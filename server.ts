@@ -68,8 +68,10 @@ app.get("/api/apiKeyStatus", (req, res) => {
 
 // API: Align Documents & System Prompt Synthesis
 app.post("/api/architect", async (req, res) => {
+  let lang = "sv";
   try {
-    const { documentsPasted, uploadedFiles, jobDescription, jobUrl, lang } = req.body;
+    lang = req.body.lang || "sv";
+    const { documentsPasted, uploadedFiles, jobDescription, jobUrl } = req.body;
     const targetLang = lang === "en" ? "English" : "Swedish";
 
     // Build raw documents context

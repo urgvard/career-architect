@@ -32,8 +32,11 @@ export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
   }
+  let lang = "sv";
   try {
-    const { documentsPasted, uploadedFiles, jobDescription, jobUrl, lang } = await req.json();
+    const body = await req.json();
+    lang = body.lang || "sv";
+    const { documentsPasted, uploadedFiles, jobDescription, jobUrl } = body;
     const targetLang = lang === "en" ? "English" : "Swedish";
 
     let fullDocumentsContext = "";
