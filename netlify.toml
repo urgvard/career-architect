@@ -4,4 +4,9 @@
 
 [functions]
   node_bundler = "esbuild"
+
+[functions.architect]
+  timeout = 26
+
+[functions.chat]
   timeout = 26
