@@ -542,7 +542,14 @@ export default function App() {
       });
 
       if (!response.ok) {
-        throw new Error(`Pipeline failed: Server status ${response.status}`);
+        let errMsg = `Pipeline failed: Server status ${response.status}`;
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) {
+            errMsg = errData.error;
+          }
+        } catch (_) {}
+        throw new Error(errMsg);
       }
 
       const parsed: AlignmentResult = await response.json();

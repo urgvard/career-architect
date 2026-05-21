@@ -65,7 +65,13 @@ export default async (req: Request, context: Context) => {
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
-    const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+    if (!apiKey) {
+      return Response.json({
+        error: "GEMINI_API_KEY is not defined in Netlify environment variables."
+      }, { status: 500 });
+    }
+
+    const ai = new GoogleGenAI({ apiKey: apiKey });
 
     const systemMetaConfigPrompt = `You are a Principal Technical Recruiter, Executive Career Coach, and Expert Prompt Engineer.
 Your core competency is auditing candidate profile documents against specialized roles/job descriptions, creating a deep matching analysis, and synthesizing a production-grade custom System Prompt for simulated interview chat sandboxes.
@@ -124,32 +130,24 @@ Construct the response conforming strictly to the responseSchema object. Use cle
             companyName: { type: Type.STRING },
             matchScore: { type: Type.INTEGER },
             personaTitle: { type: Type.STRING },
-            personaSystemPrompt: { type: Type.STRING, description: "Highly advanced, complete system prompt representing this interview persona for sandbox utilization." },
-            keyOverlaps: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "Matched keyword strengths found between profile and target job description."
-            },
-            criticalGaps: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "Crucial requirements or skills missing from candidate background."
-            },
-            coverLetter: { type: Type.STRING, description: "Customized ready-to-copy Cover Letter in Markdown format." },
+            personaSystemPrompt: { type: Type.STRING },
+            keyOverlaps: { type: Type.ARRAY, items: { type: Type.STRING } },
+            criticalGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
+            coverLetter: { type: Type.STRING },
             optimizedBulletPoints: {
               type: Type.ARRAY,
               items: {
                 type: Type.OBJECT,
                 required: ["impactArea", "originalSuggestion", "optimizedSuggestion", "keywordJustification"],
                 properties: {
-                  impactArea: { type: Type.STRING, description: "E.g., System scalability, database speed, client acquisition" },
-                  originalSuggestion: { type: Type.STRING, description: "A classic generic resume bullet statement." },
-                  optimizedSuggestion: { type: Type.STRING, description: "Optimized statement incorporating key search phrases and KPI metric metrics." },
-                  keywordJustification: { type: Type.STRING, description: "Why this change fits the job description query priorities." }
+                  impactArea: { type: Type.STRING },
+                  originalSuggestion: { type: Type.STRING },
+                  optimizedSuggestion: { type: Type.STRING },
+                  keywordJustification: { type: Type.STRING }
                 }
               }
             },
-            coachingStrategy: { type: Type.STRING, description: "Bespoke walkthrough guiding the candidate through core behavioral & technical expectations in Markdown format." }
+            coachingStrategy: { type: Type.STRING }
           }
         }
       }
@@ -158,7 +156,11 @@ Construct the response conforming strictly to the responseSchema object. Use cle
     return Response.json(JSON.parse(response.text || "{}"));
   } catch (error: any) {
     console.error("Architect function error:", error);
-    return Response.json({ error: error?.message || "Internal server error occurred during document alignment." }, { status: 500 });
+    return Response.json({ 
+      error: error?.message || "Internal server error occurred during document alignment.",
+      stack: error?.stack,
+      details: JSON.stringify(error)
+    }, { status: 500 });
   }
 };
 
