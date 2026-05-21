@@ -1115,10 +1115,13 @@ export default function App() {
 
             {/* Run error logs */}
             {alignError && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2.5 text-red-700">
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <div className="text-xs">
-                  <span className="font-bold">{t.errorTitle}:</span> {alignError}
+              <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2.5 text-red-800">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-1 text-red-600" />
+                <div className="text-xs space-y-1.5 flex-1 select-text">
+                  <h4 className="font-bold text-[13px] text-red-900 mb-0.5">{t.errorTitle}</h4>
+                  <div className="prose prose-red text-red-800 font-sans max-w-none text-[11px] leading-relaxed">
+                    <ReactMarkdown>{alignError}</ReactMarkdown>
+                  </div>
                 </div>
               </div>
             )}

@@ -191,10 +191,13 @@ export default function SandboxPlayground({ systemPrompt }: SandboxPlaygroundPro
 
         {/* Error presentation */}
         {errorStatus && (
-          <div className="p-3 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900/50 rounded-lg flex items-start gap-2 text-red-700 dark:text-red-400">
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-            <div className="text-xs">
-              <span className="font-bold">Playground Error:</span> {errorStatus}
+          <div className="p-4 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900/50 rounded-lg flex items-start gap-2.5 text-red-800 dark:text-red-300">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-1 text-red-650 dark:text-red-400" />
+            <div className="text-xs space-y-1.5 flex-1 select-text">
+              <h4 className="font-bold text-[13px] text-red-900 dark:text-red-200 mb-0.5">Playground Error</h4>
+              <div className="prose prose-red text-red-800 dark:text-red-350 font-sans max-w-none text-[11px] leading-relaxed dark:prose-invert">
+                <ReactMarkdown>{errorStatus}</ReactMarkdown>
+              </div>
             </div>
           </div>
         )}

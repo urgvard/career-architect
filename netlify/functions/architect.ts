@@ -166,8 +166,42 @@ Construct the response conforming strictly to the responseSchema object. Use cle
     return Response.json(JSON.parse(response.text || "{}"));
   } catch (error: any) {
     console.error("Architect function error:", error);
+    
+    const errStr = error?.message || String(error);
+    let friendlyError = errStr;
+    
+    if (
+      errStr.includes("429") ||
+      errStr.includes("RESOURCE_EXHAUSTED") ||
+      errStr.includes("quota") ||
+      errStr.includes("Quota") ||
+      errStr.includes("limit")
+    ) {
+      if (lang === "en") {
+        friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+
+You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+
+**How to easily resolve this:**
+1. **Wait 15 seconds**, then click the button again.
+2. Avoid clicking the button repeatedly in rapid succession.
+3. If your uploaded resume or pasted job description is exceptionally long, try shortening or summarizing the text slightly to reduce the token count.
+4. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+      } else {
+        friendlyError = `⚠️ **Begränsning i Google Gemini-kvot (Fel 429 - RESOURCE_EXHAUSTED)**
+
+Du har tillfälligt överskridit gränserna för gratisnivån (som tillåter max 15 anrop per minut och 250 000 ord/tokens per minut).
+
+**Så här löser du det enkelt:**
+1. **Vänta 15 sekunder** och klicka sedan på knappen igen.
+2. Undvik att klicka på knappen upprepade gånger i snabb följd.
+3. Om dina dokument eller din jobbannons är extremt långa, försök att korta ner dem något så att de inte överskrider gränsen.
+4. Om du använder en betald API-nyckel, säkerställ att den är korrekt konfigurerad under dina Netlify-miljövariabler eller .env-fil.`;
+      }
+    }
+    
     return Response.json({ 
-      error: error?.message || "Internal server error occurred during document alignment.",
+      error: friendlyError,
       stack: error?.stack,
       details: JSON.stringify(error)
     }, { status: 500 });
