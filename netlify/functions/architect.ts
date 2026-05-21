@@ -64,10 +64,10 @@ export default async (req: Request, context: Context) => {
       }, { status: 400 });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return Response.json({
-        error: "GEMINI_API_KEY is not defined in Netlify environment variables."
+        error: "USER_GEMINI_API_KEY is not defined in Netlify environment variables."
       }, { status: 500 });
     }
 
