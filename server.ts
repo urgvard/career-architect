@@ -2,6 +2,9 @@ import express from "express";
 import path from "path";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 const PORT = 3000;
@@ -135,7 +138,7 @@ ${resolvedJobText.trim()}
 Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside the 'coverLetter' and 'coachingStrategy' fields. Keep the synthesized 'personaSystemPrompt' extremely rigorous, containing clear parameters, expert instructions, interview behaviors, and XML structure tags so the sandbox works flawlessly.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: modelingPayload,
       config: {
         systemInstruction: systemMetaConfigPrompt,
@@ -225,7 +228,7 @@ app.post("/api/playground/chat", async (req, res) => {
     });
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: contents,
       config: {
         systemInstruction: systemPrompt,
