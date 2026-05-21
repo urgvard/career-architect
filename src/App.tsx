@@ -529,22 +529,37 @@ export default function App() {
     }
 
     try {
-      const response = await fetch("/api/architect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          documentsPasted,
-          uploadedFiles,
-          jobDescription,
-          jobUrl,
-          lang, // pass Swedish or English to generate correct language materials
+      const [coreRes, matRes] = await Promise.all([
+        fetch("/api/architect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            documentsPasted,
+            uploadedFiles,
+            jobDescription,
+            jobUrl,
+            lang,
+            mode: "core",
+          }),
         }),
-      });
+        fetch("/api/architect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            documentsPasted,
+            uploadedFiles,
+            jobDescription,
+            jobUrl,
+            lang,
+            mode: "materials",
+          }),
+        })
+      ]);
 
-      if (!response.ok) {
-        let errMsg = `Pipeline failed: Server status ${response.status}`;
+      if (!coreRes.ok) {
+        let errMsg = `Pipeline failed: Server status ${coreRes.status}`;
         try {
-          const errData = await response.json();
+          const errData = await coreRes.json();
           if (errData && errData.error) {
             errMsg = errData.error;
           }
@@ -552,7 +567,24 @@ export default function App() {
         throw new Error(errMsg);
       }
 
-      const parsed: AlignmentResult = await response.json();
+      if (!matRes.ok) {
+        let errMsg = `Pipeline failed: Server status ${matRes.status}`;
+        try {
+          const errData = await matRes.json();
+          if (errData && errData.error) {
+            errMsg = errData.error;
+          }
+        } catch (_) {}
+        throw new Error(errMsg);
+      }
+
+      const coreData = await coreRes.json();
+      const matData = await matRes.json();
+
+      const parsed: AlignmentResult = {
+        ...coreData,
+        ...matData
+      };
       setResult(parsed);
       setActiveTab("match");
     } catch (err: any) {

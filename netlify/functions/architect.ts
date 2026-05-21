@@ -36,7 +36,7 @@ export default async (req: Request, context: Context) => {
   try {
     const body = await req.json();
     lang = body.lang || "sv";
-    const { documentsPasted, uploadedFiles, jobDescription, jobUrl } = body;
+    const { documentsPasted, uploadedFiles, jobDescription, jobUrl, mode } = body;
     const targetLang = lang === "en" ? "English" : "Swedish";
 
     let fullDocumentsContext = "";
@@ -80,13 +80,103 @@ export default async (req: Request, context: Context) => {
 
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
-    const systemMetaConfigPrompt = `You are a Principal Technical Recruiter, Executive Career Coach, and Expert Prompt Engineer.
+    let systemMetaConfigPrompt = "";
+    let responseSchema: any = null;
+
+    if (mode === "core") {
+      systemMetaConfigPrompt = `You are a Principal Technical Recruiter and Executive Career Coach.
+Your core competency is auditing candidate profile documents against specialized roles/job descriptions and creating a deep matching analysis.
+
+CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'title', 'companyName', 'keyOverlaps', 'criticalGaps', and 'coachingStrategy') in the "${targetLang}" language.
+
+CRITICAL SPEED & CONCISENESS LIMITS:
+- "coachingStrategy": Provide extremely actionable, bulleted coaching points (maximum 220 words).
+
+You MUST satisfy the following structural objectives in your response:
+1. "title": Estimate or extract the clean Job Title.
+2. "companyName": Extract the clean Company/Employer Name.
+3. "matchScore": Allocate a precise 0-100 percentage match.
+4. "keyOverlaps": Highlight major overlaps or matched strengths (maximum 5 items).
+5. "criticalGaps": Highlight critical missing items or requirements gaps (maximum 5 items).
+6. "coachingStrategy": Provide strategic guidance and tactical blueprints within the 220-word limit.
+
+Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
+
+      responseSchema = {
+        type: Type.OBJECT,
+        required: [
+          "title",
+          "companyName",
+          "matchScore",
+          "keyOverlaps",
+          "criticalGaps",
+          "coachingStrategy"
+        ],
+        properties: {
+          title: { type: Type.STRING },
+          companyName: { type: Type.STRING },
+          matchScore: { type: Type.INTEGER },
+          keyOverlaps: { type: Type.ARRAY, items: { type: Type.STRING } },
+          criticalGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
+          coachingStrategy: { type: Type.STRING }
+        }
+      };
+    } else if (mode === "materials") {
+      systemMetaConfigPrompt = `You are a Technical Resume Writer, Executive Coach, and Expert Prompt Engineer.
+Your core competency is auditing candidate profile documents against specialized roles/job descriptions, writing a custom tailored cover letter, optimizing resume bullet points, and synthesizing a specialized Interviewer Persona & System Prompt.
+
+CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'coverLetter', 'personaTitle', and all properties within 'optimizedBulletPoints') in the "${targetLang}" language.
+The system prompt ('personaSystemPrompt') can contain instructions configured for the sandbox, but the mock interviewer in that prompt should also converse in "${targetLang}".
+
+CRITICAL SPEED & CONCISENESS LIMITS:
+- "coverLetter": Keep it highly compelling but compact (maximum 220 words, 3 punchy paragraphs).
+- "personaSystemPrompt": Keep the instruction set concise, sharp, and high-performance (maximum 160 words).
+- "optimizedBulletPoints": Provide exactly 3 high-impact bullet adjustments, keeping each description extremely brief.
+
+You MUST satisfy the following structural objectives in your response:
+1. "personaTitle": Design a powerful, highly specialized interviewer persona (e.g. "Senior Staff Staffing Director at Google Workspace").
+2. "personaSystemPrompt": Construct a high-performance system prompt that instructs the sandbox workspace to act as this custom persona.
+3. "coverLetter": Compose a beautifully tailored standard Cover Letter within the 220-word limit.
+4. "optimizedBulletPoints": Provide exactly 3 high-value resume bullet adjustments.
+
+Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
+
+      responseSchema = {
+        type: Type.OBJECT,
+        required: [
+          "personaTitle",
+          "personaSystemPrompt",
+          "coverLetter",
+          "optimizedBulletPoints"
+        ],
+        properties: {
+          personaTitle: { type: Type.STRING },
+          personaSystemPrompt: { type: Type.STRING },
+          coverLetter: { type: Type.STRING },
+          optimizedBulletPoints: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              required: ["impactArea", "originalSuggestion", "optimizedSuggestion", "keywordJustification"],
+              properties: {
+                impactArea: { type: Type.STRING },
+                originalSuggestion: { type: Type.STRING },
+                optimizedSuggestion: { type: Type.STRING },
+                keywordJustification: { type: Type.STRING }
+              }
+            }
+          }
+        }
+      };
+    } else {
+      // Default: full combined object (fallback/legacy)
+      systemMetaConfigPrompt = `You are a Principal Technical Recruiter, Executive Career Coach, and Expert Prompt Engineer.
 Your core competency is auditing candidate profile documents against specialized roles/job descriptions, creating a deep matching analysis, and synthesizing a production-grade custom System Prompt for simulated interview chat sandboxes.
 
 CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'title', 'companyName', 'personaTitle', 'keyOverlaps', 'criticalGaps', 'coverLetter', 'coachingStrategy', and all properties within 'optimizedBulletPoints') in the "${targetLang}" language. 
 The system prompt ('personaSystemPrompt') can contain instructions configured for the sandbox, but the mock interviewer in that prompt should also converse in "${targetLang}".
 
-CRITICAL SPEED & CONCISENESS LIMITS (Essential to prevent system timeouts):
+CRITICAL SPEED & CONCISENESS LIMITS:
 - "coverLetter": Keep it highly compelling but compact (maximum 220 words, 3 punchy paragraphs).
 - "coachingStrategy": Provide extremely actionable, bulleted coaching points (maximum 220 words).
 - "personaSystemPrompt": Keep the instruction set concise, sharp, and high-performance (maximum 160 words).
@@ -106,6 +196,47 @@ You MUST satisfy the following structural objectives in your response:
 
 Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. Let the advice and synthesized system prompts be premium, authoritative, and immediately useful. All human-readable text must be in ${targetLang}.`;
 
+      responseSchema = {
+        type: Type.OBJECT,
+        required: [
+          "title",
+          "companyName",
+          "matchScore",
+          "personaTitle",
+          "personaSystemPrompt",
+          "keyOverlaps",
+          "criticalGaps",
+          "coverLetter",
+          "optimizedBulletPoints",
+          "coachingStrategy"
+        ],
+        properties: {
+          title: { type: Type.STRING },
+          companyName: { type: Type.STRING },
+          matchScore: { type: Type.INTEGER },
+          personaTitle: { type: Type.STRING },
+          personaSystemPrompt: { type: Type.STRING },
+          keyOverlaps: { type: Type.ARRAY, items: { type: Type.STRING } },
+          criticalGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
+          coverLetter: { type: Type.STRING },
+          optimizedBulletPoints: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              required: ["impactArea", "originalSuggestion", "optimizedSuggestion", "keywordJustification"],
+              properties: {
+                impactArea: { type: Type.STRING },
+                originalSuggestion: { type: Type.STRING },
+                optimizedSuggestion: { type: Type.STRING },
+                keywordJustification: { type: Type.STRING }
+              }
+            }
+          },
+          coachingStrategy: { type: Type.STRING }
+        }
+      };
+    }
+
     const modelingPayload = `Please evaluate and align this candidate profile with the specified job opportunity, presenting all outcome text in ${targetLang}:
 
 <candidate_documents>
@@ -116,7 +247,7 @@ ${fullDocumentsContext.trim()}
 ${resolvedJobText.trim()}
 </job_description>
 
-Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside the 'coverLetter' and 'coachingStrategy' fields. Keep the synthesized 'personaSystemPrompt' extremely rigorous, containing clear parameters, expert instructions, interview behaviors, and XML structure tags so the sandbox works flawlessly.`;
+Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside appropriate text fields.`;
 
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash",
@@ -124,45 +255,7 @@ Construct the response conforming strictly to the responseSchema object. Use cle
       config: {
         systemInstruction: systemMetaConfigPrompt,
         responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          required: [
-            "title",
-            "companyName",
-            "matchScore",
-            "personaTitle",
-            "personaSystemPrompt",
-            "keyOverlaps",
-            "criticalGaps",
-            "coverLetter",
-            "optimizedBulletPoints",
-            "coachingStrategy"
-          ],
-          properties: {
-            title: { type: Type.STRING },
-            companyName: { type: Type.STRING },
-            matchScore: { type: Type.INTEGER },
-            personaTitle: { type: Type.STRING },
-            personaSystemPrompt: { type: Type.STRING },
-            keyOverlaps: { type: Type.ARRAY, items: { type: Type.STRING } },
-            criticalGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
-            coverLetter: { type: Type.STRING },
-            optimizedBulletPoints: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                required: ["impactArea", "originalSuggestion", "optimizedSuggestion", "keywordJustification"],
-                properties: {
-                  impactArea: { type: Type.STRING },
-                  originalSuggestion: { type: Type.STRING },
-                  optimizedSuggestion: { type: Type.STRING },
-                  keywordJustification: { type: Type.STRING }
-                }
-              }
-            },
-            coachingStrategy: { type: Type.STRING }
-          }
-        }
+        responseSchema: responseSchema
       }
     });
 
