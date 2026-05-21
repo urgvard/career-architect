@@ -8,6 +8,11 @@ export default async (req: Request, context: Context) => {
   try {
     const { systemPrompt, message, history } = await req.json();
     const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    
+    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
+    delete process.env.GOOGLE_GEMINI_BASE_URL;
+    delete process.env.GEMINI_API_KEY;
+
     const ai = new GoogleGenAI({ apiKey: apiKey || "" });
 
     const contents: any[] = [];

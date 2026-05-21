@@ -71,6 +71,10 @@ export default async (req: Request, context: Context) => {
       }, { status: 500 });
     }
 
+    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
+    delete process.env.GOOGLE_GEMINI_BASE_URL;
+    delete process.env.GEMINI_API_KEY;
+
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
     const systemMetaConfigPrompt = `You are a Principal Technical Recruiter, Executive Career Coach, and Expert Prompt Engineer.
