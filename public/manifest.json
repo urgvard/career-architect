@@ -1,0 +1,18 @@
+{
+  "name": "Karriärarkitekten | Career Architect",
+  "short_name": "Karriärarkitekten",
+  "description": "Align your CV/resume and cover letters with Gemini AI, run mock interview sandboxes, and export career dossiers.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0c",
+  "theme_color": "#0a0a0c",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

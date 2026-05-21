@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="cosmic-glow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="50%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#8b5cf6" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.5" />
+    </filter>
+  </defs>
+  <!-- Dark premium backing circular plate -->
+  <rect width="512" height="512" rx="128" fill="#09090b" />
+  <circle cx="256" cy="256" r="220" fill="#0e0e11" stroke="#27272a" stroke-width="4" />
+  
+  <!-- Outer glowing rings -->
+  <circle cx="256" cy="256" r="180" fill="none" stroke="url(#cosmic-glow)" stroke-width="1.5" stroke-dasharray="10 20" opacity="0.4" />
+  
+  <!-- Central Compass / Career Alignment Star -->
+  <g filter="url(#shadow)">
+    <!-- Star Points -->
+    <path d="M256 90 L280 220 L410 230 L290 270 L340 400 L256 310 L172 400 L222 270 L102 230 L232 220 Z" fill="url(#cosmic-glow)" />
+    <!-- Core Inner Diamond -->
+    <polygon points="256,180 290,240 256,290 222,240" fill="#ffffff" opacity="0.9" />
+    <!-- Floating Sparkles -->
+    <circle cx="150" cy="150" r="6" fill="#60a5fa" />
+    <circle cx="370" cy="140" r="8" fill="#a78bfa" />
+    <circle cx="340" cy="350" r="5" fill="#34d399" />
+    <circle cx="140" cy="340" r="7" fill="#fef08a" />
+  </g>
+</svg>
