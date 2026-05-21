@@ -514,46 +514,102 @@ export default function App() {
     setAlignError(null);
     setIsAligning(true);
 
-    const stages = [
-      t.step1,
-      jobUrl ? t.step2 : t.step3,
-      t.step4,
-      t.step5,
-      t.step6,
-      t.step7,
-    ];
-
-    for (let i = 0; i < stages.length; i++) {
-      setAlignStep(stages[i]);
-      await new Promise((resolve) => setTimeout(resolve, 310));
-    }
-
     try {
+      let resolvedJobText = jobDescription;
+
+      // 1. URL Scraper Step (Upfront & Single Threaded)
+      if (hasJobUrl) {
+        setAlignStep(t.step2); // "Hämtar data från jobbannonsens URL..."
+        try {
+          const scrapeRes = await fetch("/api/scrape", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobUrl }),
+          });
+          
+          if (!scrapeRes.ok) {
+            const errData = await scrapeRes.json().catch(() => ({}));
+            throw new Error(errData.error || `HTTP status ${scrapeRes.status}`);
+          }
+          
+          const scrapeData = await scrapeRes.json();
+          resolvedJobText = `URL: ${jobUrl}\nContent crawled:\n${scrapeData.crawledText}\n\n${jobDescription}`;
+        } catch (scrapeErr: any) {
+          console.warn("Scraper utility encountered an error:", scrapeErr);
+          if (!hasPastedJob) {
+            throw new Error(lang === "en" 
+              ? `Could not crawl job page: ${scrapeErr.message}. Please paste the description manually.` 
+              : `Kunde inte hämta jobbannonsen: ${scrapeErr.message}. Klistra in beskrivningen manuellt.`);
+          }
+        }
+      }
+
+      // 2. Step animations for visual pacing & real progress state
+      setAlignStep(t.step3); // "Analyserar semantiska nyckelordsöverskott..."
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      
+      setAlignStep(t.step4); // "Formulerar personliga rekryteringskaraktärer..."
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      setAlignStep(t.step5); // "Syntetiserar professionella personliga brev..."
+
+      // Helper to check if a 500 error response is actually a Gemini quota error
+      const isQuotaError = async (resCopy: Response): Promise<boolean> => {
+        try {
+          const data = await resCopy.json();
+          const errStr = data?.error || "";
+          return (
+            errStr.includes("429") ||
+            errStr.includes("RESOURCE_EXHAUSTED") ||
+            errStr.includes("quota") ||
+            errStr.includes("Quota") ||
+            errStr.includes("limit")
+          );
+        } catch (_) {
+          return false;
+        }
+      };
+
+      // Resilient fetch helper with exponential backoff on 429 / resource exhaust limit
+      const fetchWithRetry = async (mode: "core" | "materials", retriesLeft = 2): Promise<Response> => {
+        try {
+          const res = await fetch("/api/architect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              documentsPasted,
+              uploadedFiles,
+              jobDescription: resolvedJobText,
+              lang,
+              mode,
+            }),
+          });
+          
+          if (res.status === 429 || (res.status === 500 && await isQuotaError(res.clone()))) {
+            if (retriesLeft > 0) {
+              const retryMsg = lang === "en" 
+                ? `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...` 
+                : `⚠️ Kvotgräns nådd för ${mode === "core" ? "matchningsrapport" : "ansökningshandlingar"}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`;
+              setAlignStep(retryMsg);
+              await new Promise((resolve) => setTimeout(resolve, 4000));
+              setAlignStep(mode === "core" ? t.step3 : t.step5);
+              return await fetchWithRetry(mode, retriesLeft - 1);
+            }
+          }
+          return res;
+        } catch (err) {
+          if (retriesLeft > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 4000));
+            return await fetchWithRetry(mode, retriesLeft - 1);
+          }
+          throw err;
+        }
+      };
+
+      // Fire parallel executions
       const [coreRes, matRes] = await Promise.all([
-        fetch("/api/architect", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            documentsPasted,
-            uploadedFiles,
-            jobDescription,
-            jobUrl,
-            lang,
-            mode: "core",
-          }),
-        }),
-        fetch("/api/architect", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            documentsPasted,
-            uploadedFiles,
-            jobDescription,
-            jobUrl,
-            lang,
-            mode: "materials",
-          }),
-        })
+        fetchWithRetry("core"),
+        fetchWithRetry("materials")
       ]);
 
       if (!coreRes.ok) {
@@ -585,6 +641,10 @@ export default function App() {
         ...coreData,
         ...matData
       };
+      
+      setAlignStep(t.step7); // Finalizing
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
       setResult(parsed);
       setActiveTab("match");
     } catch (err: any) {

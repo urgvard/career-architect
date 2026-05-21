@@ -66,12 +66,29 @@ app.get("/api/apiKeyStatus", (req, res) => {
   res.json({ hasKey });
 });
 
+// API: Scrape a job advertisement URL
+app.post("/api/scrape", async (req, res) => {
+  try {
+    const { jobUrl } = req.body;
+    if (!jobUrl || !jobUrl.trim().startsWith("http")) {
+      return res.status(400).json({ error: "Invalid URL provided." });
+    }
+    const crawledText = await fetchCleanUrl(jobUrl.trim());
+    if (crawledText.startsWith("[Scrape Error:")) {
+      return res.status(500).json({ error: crawledText });
+    }
+    res.json({ crawledText });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || "Failed to retrieve job advertisement content." });
+  }
+});
+
 // API: Align Documents & System Prompt Synthesis
 app.post("/api/architect", async (req, res) => {
   let lang = "sv";
   try {
     lang = req.body.lang || "sv";
-    const { documentsPasted, uploadedFiles, jobDescription, jobUrl, mode } = req.body;
+    const { documentsPasted, uploadedFiles, jobDescription, mode } = req.body;
     const targetLang = lang === "en" ? "English" : "Swedish";
 
     // Build raw documents context
@@ -92,12 +109,7 @@ app.post("/api/architect", async (req, res) => {
     }
 
     // Resolve Job Description
-    let resolvedJobText = jobDescription || "";
-    if (jobUrl && jobUrl.trim().startsWith("http")) {
-      const crawledText = await fetchCleanUrl(jobUrl.trim());
-      resolvedJobText = `URL: ${jobUrl}\nContent crawled:\n${crawledText}\n\n${resolvedJobText}`;
-    }
-
+    const resolvedJobText = jobDescription || "";
     if (!resolvedJobText.trim()) {
       return res.status(400).json({ 
         error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL." 

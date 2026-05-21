@@ -1,33 +1,6 @@
 import type { Context, Config } from "@netlify/functions";
 import { GoogleGenAI, Type } from "@google/genai";
 
-async function fetchCleanUrl(urlStr: string): Promise<string> {
-  try {
-    const parsed = new URL(urlStr);
-    const response = await fetch(parsed.toString(), {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ClientHelper/1.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
-      },
-      signal: AbortSignal.timeout(6000),
-    });
-    
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const html = await response.text();
-    let text = html
-      .replace(/<script[^>]*>([\s\S]*?)<\/script>/gi, " ")
-      .replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, " ")
-      .replace(/<head[^>]*>([\s\S]*?)<\/head>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    return text.substring(0, 10000);
-  } catch (error: any) {
-    return `[Scrape Error: ${error.message}]`;
-  }
-}
-
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
@@ -36,7 +9,7 @@ export default async (req: Request, context: Context) => {
   try {
     const body = await req.json();
     lang = body.lang || "sv";
-    const { documentsPasted, uploadedFiles, jobDescription, jobUrl, mode } = body;
+    const { documentsPasted, uploadedFiles, jobDescription, mode } = body;
     const targetLang = lang === "en" ? "English" : "Swedish";
 
     let fullDocumentsContext = "";
@@ -55,12 +28,7 @@ export default async (req: Request, context: Context) => {
       }, { status: 400 });
     }
 
-    let resolvedJobText = jobDescription || "";
-    if (jobUrl && jobUrl.trim().startsWith("http")) {
-      const crawledText = await fetchCleanUrl(jobUrl.trim());
-      resolvedJobText = `URL: ${jobUrl}\nContent crawled:\n${crawledText}\n\n${resolvedJobText}`;
-    }
-
+    const resolvedJobText = jobDescription || "";
     if (!resolvedJobText.trim()) {
       return Response.json({ 
         error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL." 
