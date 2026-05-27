@@ -618,11 +618,9 @@ export default function App() {
       };
 
       // Fire parallel executions
-      setAlignStep(t.step8 || "Building ATS resume...");
-      const [coreRes, matRes, resumeRes] = await Promise.all([
+      const [coreRes, matRes] = await Promise.all([
         fetchWithRetry("core"),
-        fetchWithRetry("materials"),
-        fetchWithRetry("resume")
+        fetchWithRetry("materials")
       ]);
 
       if (!coreRes.ok) {
@@ -646,16 +644,20 @@ export default function App() {
         } catch (_) {}
         throw new Error(errMsg);
       }
-      if (!resumeRes.ok) {
-        // Non-fatal: resume generation failed, continue without it
-        console.warn("Resume generation failed, continuing without it.");
-      }
 
       const coreData = await coreRes.json();
       const matData = await matRes.json();
+
+      // Resume is sequential + non-fatal so it cannot delay or kill the main pipeline
       let resumeData: any = null;
-      if (resumeRes.ok) {
-        try { resumeData = await resumeRes.json(); } catch (_) {}
+      try {
+        setAlignStep(t.step8 || "Building ATS resume...");
+        const resumeRes = await fetchWithRetry("resume");
+        if (resumeRes.ok) {
+          try { resumeData = await resumeRes.json(); } catch (_) {}
+        }
+      } catch (_) {
+        console.warn("Resume generation failed, continuing without it.");
       }
 
       const parsed: AlignmentResult = {
