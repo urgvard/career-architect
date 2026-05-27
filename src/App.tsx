@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { UploadFile, AlignmentResult, BulletOptimization } from "./types";
 import SandboxPlayground from "./components/SandboxPlayground";
+import CVBuilder from "./components/CVBuilder";
 import {
   UploadCloud,
   FileText,
@@ -88,6 +89,11 @@ const TRANSLATIONS = {
     downloadBulletsBtn: "Ladda ner meritpunkter (TXT)",
     downloadCoachingBtn: "Ladda ner intervjuguide (MD)",
     downloadAllBundle: "Ladda ner komplett materialpaket (.MD)",
+    cvBuilderTitle: "📄 ATS-Optimerat CV",
+    cvBuilderSubtitle: "Professionellt CV skräddarsytt och optimerat för ATS-system och rekryterare.",
+    downloadCVPdf: "Ladda ner CV (PDF)",
+    downloadCoverPdf: "Ladda ner brev (PDF)",
+    step8: "Konstruerar ATS-optimerat CV...",
     skipSplash: "Gå direkt till verktyget",
     splashTitle: "Karriärarkitekten",
     splashSub: "Vintergatan möter din yrkesbana. Stjärnorna anpassas för din nästa karriär.",
@@ -161,6 +167,11 @@ const TRANSLATIONS = {
     downloadBulletsBtn: "Download Optimized Bullets (TXT)",
     downloadCoachingBtn: "Download Coaching Guide (MD)",
     downloadAllBundle: "Download Package (.MD)",
+    cvBuilderTitle: "📄 ATS-Optimized Resume",
+    cvBuilderSubtitle: "Professional resume crafted and optimized for ATS systems and headhunters.",
+    downloadCVPdf: "Download Resume (PDF)",
+    downloadCoverPdf: "Download Cover Letter (PDF)",
+    step8: "Constructing ATS-optimized resume...",
     skipSplash: "Go direct to workspace",
     splashTitle: "Career Architect",
     splashSub: "Where the stars of the universe align with your vocational journey. Prepared with visual cosmic alignments.",
@@ -221,7 +232,7 @@ export default function App() {
   const [result, setResult] = useState<AlignmentResult | null>(null);
 
   // Internal Active TAB Interface View
-  const [activeTab, setActiveTab] = useState<"match" | "cover-letter" | "resume-bullets" | "system-prompt" | "playground">("match");
+  const [activeTab, setActiveTab] = useState<"match" | "cover-letter" | "resume-bullets" | "system-prompt" | "playground" | "ats-cv">("match");
   const [copiedStates, setCopiedStates] = useState<{ [key: string]: boolean }>({});
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
 
@@ -607,9 +618,11 @@ export default function App() {
       };
 
       // Fire parallel executions
-      const [coreRes, matRes] = await Promise.all([
+      setAlignStep(t.step8 || "Building ATS resume...");
+      const [coreRes, matRes, resumeRes] = await Promise.all([
         fetchWithRetry("core"),
-        fetchWithRetry("materials")
+        fetchWithRetry("materials"),
+        fetchWithRetry("resume")
       ]);
 
       if (!coreRes.ok) {
@@ -633,13 +646,22 @@ export default function App() {
         } catch (_) {}
         throw new Error(errMsg);
       }
+      if (!resumeRes.ok) {
+        // Non-fatal: resume generation failed, continue without it
+        console.warn("Resume generation failed, continuing without it.");
+      }
 
       const coreData = await coreRes.json();
       const matData = await matRes.json();
+      let resumeData: any = null;
+      if (resumeRes.ok) {
+        try { resumeData = await resumeRes.json(); } catch (_) {}
+      }
 
       const parsed: AlignmentResult = {
         ...coreData,
-        ...matData
+        ...matData,
+        ...(resumeData?.resumeData ? { resumeData: resumeData.resumeData } : {})
       };
       
       setAlignStep(t.step7); // Finalizing
@@ -676,6 +698,31 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+
+  const downloadCoverLetterPDF = () => {
+    if (!result) return;
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Cover Letter</title>
+<style>
+  body { font-family: Georgia, serif; font-size: 11pt; line-height: 1.7; color: #1a1a1a; max-width: 700px; margin: 40px auto; padding: 0 30px; }
+  h1 { font-size: 14pt; color: #1a365d; border-bottom: 1px solid #ccc; padding-bottom: 8px; margin-bottom: 20px; }
+  @page { size: A4; margin: 20mm; }
+  @media print { body { margin: 0; } }
+  .print-bar { text-align:center; padding: 12px; background: #f7fafc; border-bottom: 1px solid #e2e8f0; }
+  .print-btn { background:#2b6cb0; color:#fff; border:none; padding:8px 20px; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; }
+</style></head><body>
+<div class="print-bar"><button class="print-btn" onclick="window.print()">🖨 Save as PDF / Print</button></div>
+<h1>${result.title} @ ${result.companyName}</h1>
+<div style="white-space:pre-wrap">${result.coverLetter.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.*?)\*/g, '<em>$1</em>')}</div>
+</body></html>`;
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const printWin = window.open(url, "_blank", "width=860,height=750,scrollbars=yes");
+    if (printWin) {
+      printWin.addEventListener("load", () => {
+        setTimeout(() => { printWin.print(); URL.revokeObjectURL(url); }, 600);
+      });
+    }
+  };
   const downloadOptimizedBullets = () => {
     if (!result) return;
     let textOut = `=== OPTIMERADE MERITPUNKTER (CV-BULLETS) - ${result.title} @ ${result.companyName} ===\n\n`;
@@ -1241,6 +1288,7 @@ export default function App() {
                     { id: "match", label: t.scorecardTitle },
                     { id: "cover-letter", label: t.coverLetterTitle },
                     { id: "resume-bullets", label: t.resumeTitle },
+            { id: "ats-cv", label: t.cvBuilderTitle },
                     { id: "system-prompt", label: t.systemPromptTitle },
                     { id: "playground", label: t.sandboxTitle },
                   ].map((tab) => {
@@ -1488,6 +1536,9 @@ export default function App() {
                               <Download className="w-3.5 h-3.5" />
                               {t.downloadBtn}
                             </button>
+                              <button onClick={downloadCoverLetterPDF} className="px-2.5 py-1.5 border border-neutral-200 dark:border-neutral-700 rounded-lg text-xs font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors flex items-center gap-1.5">
+                                <FileDown size={14} /> {t.downloadCoverPdf}
+                              </button>
                           </div>
                         </div>
 
@@ -1576,6 +1627,24 @@ export default function App() {
                         </div>
                       </div>
                     )}
+
+          {/* TAB VIEWPORT: ATS-Optimized CV Builder */}
+          {activeTab === "ats-cv" && (
+            <div className="p-4 md:p-6">
+              {result?.resumeData ? (
+                <CVBuilder
+                  resumeData={result.resumeData}
+                  companyName={result.companyName}
+                  lang={lang}
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center py-16 text-neutral-400">
+                  <span className="text-4xl mb-3">📄</span>
+                  <p className="text-sm">{lang === "sv" ? "CV genereras automatiskt när du kör en analys." : "Resume will be generated automatically when you run an analysis."}</p>
+                </div>
+              )}
+            </div>
+          )}
 
                     {/* TAB VIEWPORT: CARD INDEX_4: System instructions preview code */}
                     {activeTab === "system-prompt" && (
