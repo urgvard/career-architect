@@ -136,6 +136,88 @@ Your output must be returned strictly in JSON adhering to the specified schema c
           }
         }
       };
+    } else if (mode === "resume") {
+      systemMetaConfigPrompt = `You are an expert Resume Writer and ATS Optimization Specialist with 15+ years of executive recruiting experience.
+Your task is to construct a complete, professionally formatted, ATS-optimized resume/CV for the candidate, precisely tailored to the target job.
+
+CRITICAL EXTRACTION RULES:
+- Extract ONLY real information found in the candidate documents. Do NOT invent companies, roles, or qualifications.
+- If contact details are missing, use empty strings.
+- Generate all professional text (summary, bullet points) in "${targetLang}".
+- Bullet points must be achievement-focused and keyword-rich based on the job description (use STAR format where possible).
+- Summary must be 3-4 sentences: hook, key experience, value proposition, tailored to the role.
+- Extract and include ALL available experience, skills, education from the documents.`;
+
+      responseSchema = {
+        type: Type.OBJECT,
+        required: ["resumeData"],
+        properties: {
+          resumeData: {
+            type: Type.OBJECT,
+            required: ["name", "targetRole", "contact", "summary", "experience", "skills", "education", "certifications", "languages", "achievements"],
+            properties: {
+              name: { type: Type.STRING, description: "Candidate full name extracted from documents. Use 'Your Name' if not found." },
+              targetRole: { type: Type.STRING, description: "Target job title, tailored to match the job description." },
+              contact: {
+                type: Type.OBJECT,
+                properties: {
+                  email:    { type: Type.STRING },
+                  phone:    { type: Type.STRING },
+                  location: { type: Type.STRING },
+                  linkedin: { type: Type.STRING },
+                  website:  { type: Type.STRING }
+                }
+              },
+              summary: { type: Type.STRING, description: "3-4 sentence ATS-optimized professional summary tailored to the job." },
+              experience: {
+                type: Type.ARRAY,
+                description: "All work experience extracted from candidate documents.",
+                items: {
+                  type: Type.OBJECT,
+                  required: ["company", "role", "period", "bullets"],
+                  properties: {
+                    company:  { type: Type.STRING },
+                    role:     { type: Type.STRING },
+                    period:   { type: Type.STRING, description: "e.g. Jan 2022 \u2013 Mar 2024" },
+                    location: { type: Type.STRING },
+                    bullets: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                      description: "3-5 achievement-focused ATS-optimized bullets per role with quantified results where possible."
+                    }
+                  }
+                }
+              },
+              skills: {
+                type: Type.OBJECT,
+                required: ["technical", "soft", "tools"],
+                properties: {
+                  technical: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Programming languages, frameworks, methodologies." },
+                  tools:     { type: Type.ARRAY, items: { type: Type.STRING }, description: "Software tools, platforms, cloud services." },
+                  soft:      { type: Type.ARRAY, items: { type: Type.STRING }, description: "Leadership, communication, management competencies." }
+                }
+              },
+              education: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  required: ["degree", "institution", "year"],
+                  properties: {
+                    degree:      { type: Type.STRING },
+                    institution: { type: Type.STRING },
+                    year:        { type: Type.STRING },
+                    gpa:         { type: Type.STRING }
+                  }
+                }
+              },
+              certifications: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Professional certifications and licenses." },
+              languages:      { type: Type.ARRAY, items: { type: Type.STRING }, description: "e.g. 'Swedish (Native)', 'English (Fluent)'." },
+              achievements:   { type: Type.ARRAY, items: { type: Type.STRING }, description: "Notable awards, recognition, or major accomplishments." }
+            }
+          }
+        }
+      };
+
     } else {
       // Default: full combined object (fallback/legacy)
       systemMetaConfigPrompt = `You are a Principal Technical Recruiter, Executive Career Coach, and Expert Prompt Engineer.
