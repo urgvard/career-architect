@@ -98,8 +98,8 @@ const TRANSLATIONS = {
     splashTitle: "Karriärarkitekten",
     splashSub: "Vintergatan möter din yrkesbana. Stjärnorna anpassas för din nästa karriär.",
     splashTimer: "Källkoden förbereds... Träder in om {seconds} sekunder",
-    missingKeyTitle: "Lokal API-nyckel saknas",
-    missingKeyMessage: "Applikationen behöver din GEMINI_API_KEY för att analysera din profil. Öppna fliken Inställningar > Hemligheter för att lägga till den.",
+    missingKeyTitle: "AI-tjänsten ej tillgänglig",
+    missingKeyMessage: "AI-tjänsten kunde inte nås. Applikationen måste vara deployad på Netlify för att AI Gateway ska fungera.",
     feedbackClear: "Rensa fält",
     clearFiles: "Rensa alla",
     packageDownloadTip: "Ladda ner alla genererade filer i ett enda samlat dokument (.md) till din dator",
@@ -176,8 +176,8 @@ const TRANSLATIONS = {
     splashTitle: "Career Architect",
     splashSub: "Where the stars of the universe align with your vocational journey. Prepared with visual cosmic alignments.",
     splashTimer: "Preparing workspaces... Entering in {seconds} seconds",
-    missingKeyTitle: "Missing Local API Key Setting",
-    missingKeyMessage: "The application needs your GEMINI_API_KEY to analyze your profile. Go to the Settings > Secrets tab to configure it.",
+    missingKeyTitle: "AI Service Unavailable",
+    missingKeyMessage: "The AI service could not be reached. The application must be deployed on Netlify for AI Gateway to function.",
     feedbackClear: "Clear form",
     clearFiles: "Clear all",
     packageDownloadTip: "Download all generated materials inside a single cohesive portfolio markdown file (.md)",
@@ -582,7 +582,7 @@ export default function App() {
       };
 
       // Resilient fetch helper with exponential backoff on 429 / resource exhaust limit
-      const fetchWithRetry = async (mode: "core" | "materials", retriesLeft = 2): Promise<Response> => {
+      const fetchWithRetry = async (mode: "core" | "materials" | "resume", retriesLeft = 2): Promise<Response> => {
         try {
           const res = await fetch("/api/architect", {
             method: "POST",
@@ -596,14 +596,20 @@ export default function App() {
             }),
           });
           
-          if (res.status === 429 || (res.status === 500 && await isQuotaError(res.clone()))) {
+          if (res.status === 429 || res.status === 503 || res.status === 504 || (res.status === 500 && await isQuotaError(res.clone()))) {
             if (retriesLeft > 0) {
-              const retryMsg = lang === "en" 
-                ? `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...` 
-                : `⚠️ Kvotgräns nådd för ${mode === "core" ? "matchningsrapport" : "ansökningshandlingar"}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`;
+              const isTimeout = res.status === 503 || res.status === 504;
+              const retryMsg = lang === "en"
+                ? isTimeout
+                  ? `⚠️ Server timeout for ${mode} analysis. Retrying in 4 seconds (${retriesLeft} retries left)...`
+                  : `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...`
+                : isTimeout
+                  ? `⚠️ Servern svarade inte i tid för ${mode === "core" ? "matchningsrapport" : "ansökningshandlingar"}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`
+                  : `⚠️ Kvotgräns nådd för ${mode === "core" ? "matchningsrapport" : "ansökningshandlingar"}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`;
               setAlignStep(retryMsg);
               await new Promise((resolve) => setTimeout(resolve, 4000));
-              setAlignStep(mode === "core" ? t.step3 : t.step5);
+              const stepMsg = mode === "core" ? t.step3 : mode === "resume" ? (t.step8 || "Building ATS resume...") : t.step5;
+              setAlignStep(stepMsg);
               return await fetchWithRetry(mode, retriesLeft - 1);
             }
           }
@@ -617,11 +623,11 @@ export default function App() {
         }
       };
 
-      // Fire parallel executions
-      const [coreRes, matRes] = await Promise.all([
-        fetchWithRetry("core"),
-        fetchWithRetry("materials")
-      ]);
+      // Fire with stagger to reduce Gemini rate-limit contention
+      const corePromise = fetchWithRetry("core");
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const matPromise = fetchWithRetry("materials");
+      const [coreRes, matRes] = await Promise.all([corePromise, matPromise]);
 
       if (!coreRes.ok) {
         let errMsg = `Pipeline failed: Server status ${coreRes.status}`;

@@ -22,31 +22,30 @@ export default async (req: Request, context: Context) => {
       });
     }
 
+    const MAX_DOC_CHARS = 12000;
+    if (fullDocumentsContext.length > MAX_DOC_CHARS) {
+      fullDocumentsContext = fullDocumentsContext.slice(0, MAX_DOC_CHARS) + "\n[... truncated for processing speed ...]";
+    }
+
     if (!fullDocumentsContext.trim()) {
       return Response.json({ 
         error: lang === "en" ? "Please enter or upload at least one candidate document." : "Vänligen fyll i eller ladda upp minst ett kandidatdokument." 
       }, { status: 400 });
     }
 
-    const resolvedJobText = jobDescription || "";
+    let resolvedJobText = jobDescription || "";
     if (!resolvedJobText.trim()) {
-      return Response.json({ 
-        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL." 
+      return Response.json({
+        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL."
       }, { status: 400 });
     }
 
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return Response.json({
-        error: "USER_GEMINI_API_KEY is not defined in Netlify environment variables."
-      }, { status: 500 });
+    const MAX_JOB_CHARS = 8000;
+    if (resolvedJobText.length > MAX_JOB_CHARS) {
+      resolvedJobText = resolvedJobText.slice(0, MAX_JOB_CHARS) + "\n[... truncated for processing speed ...]";
     }
 
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
-
-    const ai = new GoogleGenAI({ apiKey: apiKey });
+    const ai = new GoogleGenAI({});
 
     let systemMetaConfigPrompt = "";
     let responseSchema: any = null;
@@ -299,15 +298,21 @@ ${resolvedJobText.trim()}
 
 Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside appropriate text fields.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: modelingPayload,
-      config: {
-        systemInstruction: systemMetaConfigPrompt,
-        responseMimeType: "application/json",
-        responseSchema: responseSchema
-      }
-    });
+    const GEMINI_TIMEOUT_MS = 23000;
+    const response = await Promise.race([
+      ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: modelingPayload,
+        config: {
+          systemInstruction: systemMetaConfigPrompt,
+          responseMimeType: "application/json",
+          responseSchema: responseSchema
+        }
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("GEMINI_TIMEOUT")), GEMINI_TIMEOUT_MS)
+      )
+    ]);
 
     return Response.json(JSON.parse(response.text || "{}"));
   } catch (error: any) {
@@ -315,7 +320,16 @@ Construct the response conforming strictly to the responseSchema object. Use cle
     
     const errStr = error?.message || String(error);
     let friendlyError = errStr;
-    
+
+    if (errStr.includes("GEMINI_TIMEOUT")) {
+      return Response.json({
+        error: lang === "en"
+          ? "The AI model took too long to respond. Please try again."
+          : "AI-modellen tog för lång tid att svara. Försök igen.",
+        retryable: true
+      }, { status: 503 });
+    }
+
     if (
       errStr.includes("429") ||
       errStr.includes("RESOURCE_EXHAUSTED") ||
@@ -324,25 +338,23 @@ Construct the response conforming strictly to the responseSchema object. Use cle
       errStr.includes("limit")
     ) {
       if (lang === "en") {
-        friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **AI Rate Limit Reached (Error 429)**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+The AI service is temporarily rate-limited. This usually resolves itself quickly.
 
-**How to easily resolve this:**
+**How to resolve this:**
 1. **Wait 15 seconds**, then click the button again.
 2. Avoid clicking the button repeatedly in rapid succession.
-3. If your uploaded resume or pasted job description is exceptionally long, try shortening or summarizing the text slightly to reduce the token count.
-4. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+3. If your documents or job description are very long, try shortening them slightly.`;
       } else {
-        friendlyError = `⚠️ **Begränsning i Google Gemini-kvot (Fel 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **AI-hastighetsgräns nådd (Fel 429)**
 
-Du har tillfälligt överskridit gränserna för gratisnivån (som tillåter max 15 anrop per minut och 250 000 ord/tokens per minut).
+AI-tjänsten är tillfälligt hastighetsbegränsad. Detta löser sig vanligtvis snabbt.
 
-**Så här löser du det enkelt:**
+**Så här löser du det:**
 1. **Vänta 15 sekunder** och klicka sedan på knappen igen.
 2. Undvik att klicka på knappen upprepade gånger i snabb följd.
-3. Om dina dokument eller din jobbannons är extremt långa, försök att korta ner dem något så att de inte överskrider gränsen.
-4. Om du använder en betald API-nyckel, säkerställ att den är korrekt konfigurerad under dina Netlify-miljövariabler eller .env-fil.`;
+3. Om dina dokument eller din jobbannons är mycket långa, försök att korta ner dem något.`;
       }
     }
     
