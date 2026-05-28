@@ -660,16 +660,23 @@ export default function App() {
         setAlignStep(t.step8 || "Building ATS resume...");
         const resumeRes = await fetchWithRetry("resume");
         if (resumeRes.ok) {
-          try { resumeData = await resumeRes.json(); } catch (_) {}
+          try {
+            const json = await resumeRes.json();
+            resumeData = json?.resumeData || json;
+          } catch (e) {
+            console.error("Resume JSON parse failed:", e);
+          }
+        } else {
+          console.error("Resume API returned status:", resumeRes.status);
         }
-      } catch (_) {
-        console.warn("Resume generation failed, continuing without it.");
+      } catch (e) {
+        console.error("Resume generation failed:", e);
       }
 
       const parsed: AlignmentResult = {
         ...coreData,
         ...matData,
-        ...(resumeData?.resumeData ? { resumeData: resumeData.resumeData } : {})
+        ...(resumeData?.name ? { resumeData } : {})
       };
       
       setAlignStep(t.step7); // Finalizing

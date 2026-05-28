@@ -28,8 +28,8 @@ export default async (req: Request, context: Context) => {
     }
 
     if (!fullDocumentsContext.trim()) {
-      return Response.json({ 
-        error: lang === "en" ? "Please enter or upload at least one candidate document." : "Vänligen fyll i eller ladda upp minst ett kandidatdokument." 
+      return Response.json({
+        error: lang === "en" ? "Please enter or upload at least one candidate document." : "Vänligen fyll i eller ladda upp minst ett kandidatdokument."
       }, { status: 400 });
     }
 
@@ -136,84 +136,74 @@ Your output must be returned strictly in JSON adhering to the specified schema c
         }
       };
     } else if (mode === "resume") {
-      systemMetaConfigPrompt = `You are an expert Resume Writer and ATS Optimization Specialist with 15+ years of executive recruiting experience.
-Your task is to construct a complete, professionally formatted, ATS-optimized resume/CV for the candidate, precisely tailored to the target job.
+      systemMetaConfigPrompt = `You are an expert Resume Writer and ATS Optimization Specialist.
+Build an ATS-optimized resume/CV for the candidate, tailored to the target job. Output in "${targetLang}".
 
-CRITICAL EXTRACTION RULES:
-- Extract ONLY real information found in the candidate documents. Do NOT invent companies, roles, or qualifications.
-- If contact details are missing, use empty strings.
-- Generate all professional text (summary, bullet points) in "${targetLang}".
-- Bullet points must be achievement-focused and keyword-rich based on the job description (use STAR format where possible).
-- Summary must be 3-4 sentences: hook, key experience, value proposition, tailored to the role.
-- Extract and include ALL available experience, skills, education from the documents.`;
+RULES:
+- Extract ONLY real information from the candidate documents. Do NOT invent companies, roles, or qualifications.
+- Use empty strings for missing contact details.
+- Summary: 2-3 sentences max.
+- Bullet points: achievement-focused, keyword-rich, concise. Max 3 bullets per role.
+- Include up to 5 most relevant roles. Omit very old or irrelevant positions.
+- Keep skill lists to max 8 items each.
+- Keep certifications, languages, achievements to max 5 items each.`;
 
       responseSchema = {
         type: Type.OBJECT,
-        required: ["resumeData"],
+        required: ["name", "targetRole", "contact", "summary", "experience", "skills", "education", "certifications", "languages", "achievements"],
         properties: {
-          resumeData: {
+          name: { type: Type.STRING },
+          targetRole: { type: Type.STRING },
+          contact: {
             type: Type.OBJECT,
-            required: ["name", "targetRole", "contact", "summary", "experience", "skills", "education", "certifications", "languages", "achievements"],
             properties: {
-              name: { type: Type.STRING, description: "Candidate full name extracted from documents. Use 'Your Name' if not found." },
-              targetRole: { type: Type.STRING, description: "Target job title, tailored to match the job description." },
-              contact: {
-                type: Type.OBJECT,
-                properties: {
-                  email:    { type: Type.STRING },
-                  phone:    { type: Type.STRING },
-                  location: { type: Type.STRING },
-                  linkedin: { type: Type.STRING },
-                  website:  { type: Type.STRING }
-                }
-              },
-              summary: { type: Type.STRING, description: "3-4 sentence ATS-optimized professional summary tailored to the job." },
-              experience: {
-                type: Type.ARRAY,
-                description: "All work experience extracted from candidate documents.",
-                items: {
-                  type: Type.OBJECT,
-                  required: ["company", "role", "period", "bullets"],
-                  properties: {
-                    company:  { type: Type.STRING },
-                    role:     { type: Type.STRING },
-                    period:   { type: Type.STRING, description: "e.g. Jan 2022 \u2013 Mar 2024" },
-                    location: { type: Type.STRING },
-                    bullets: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                      description: "3-5 achievement-focused ATS-optimized bullets per role with quantified results where possible."
-                    }
-                  }
-                }
-              },
-              skills: {
-                type: Type.OBJECT,
-                required: ["technical", "soft", "tools"],
-                properties: {
-                  technical: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Programming languages, frameworks, methodologies." },
-                  tools:     { type: Type.ARRAY, items: { type: Type.STRING }, description: "Software tools, platforms, cloud services." },
-                  soft:      { type: Type.ARRAY, items: { type: Type.STRING }, description: "Leadership, communication, management competencies." }
-                }
-              },
-              education: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  required: ["degree", "institution", "year"],
-                  properties: {
-                    degree:      { type: Type.STRING },
-                    institution: { type: Type.STRING },
-                    year:        { type: Type.STRING },
-                    gpa:         { type: Type.STRING }
-                  }
-                }
-              },
-              certifications: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Professional certifications and licenses." },
-              languages:      { type: Type.ARRAY, items: { type: Type.STRING }, description: "e.g. 'Swedish (Native)', 'English (Fluent)'." },
-              achievements:   { type: Type.ARRAY, items: { type: Type.STRING }, description: "Notable awards, recognition, or major accomplishments." }
+              email:    { type: Type.STRING },
+              phone:    { type: Type.STRING },
+              location: { type: Type.STRING },
+              linkedin: { type: Type.STRING },
+              website:  { type: Type.STRING }
             }
-          }
+          },
+          summary: { type: Type.STRING },
+          experience: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              required: ["company", "role", "period", "bullets"],
+              properties: {
+                company:  { type: Type.STRING },
+                role:     { type: Type.STRING },
+                period:   { type: Type.STRING },
+                location: { type: Type.STRING },
+                bullets:  { type: Type.ARRAY, items: { type: Type.STRING } }
+              }
+            }
+          },
+          skills: {
+            type: Type.OBJECT,
+            required: ["technical", "soft", "tools"],
+            properties: {
+              technical: { type: Type.ARRAY, items: { type: Type.STRING } },
+              tools:     { type: Type.ARRAY, items: { type: Type.STRING } },
+              soft:      { type: Type.ARRAY, items: { type: Type.STRING } }
+            }
+          },
+          education: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              required: ["degree", "institution", "year"],
+              properties: {
+                degree:      { type: Type.STRING },
+                institution: { type: Type.STRING },
+                year:        { type: Type.STRING },
+                gpa:         { type: Type.STRING }
+              }
+            }
+          },
+          certifications: { type: Type.ARRAY, items: { type: Type.STRING } },
+          languages:      { type: Type.ARRAY, items: { type: Type.STRING } },
+          achievements:   { type: Type.ARRAY, items: { type: Type.STRING } }
         }
       };
 
@@ -222,7 +212,7 @@ CRITICAL EXTRACTION RULES:
       systemMetaConfigPrompt = `You are a Principal Technical Recruiter, Executive Career Coach, and Expert Prompt Engineer.
 Your core competency is auditing candidate profile documents against specialized roles/job descriptions, creating a deep matching analysis, and synthesizing a production-grade custom System Prompt for simulated interview chat sandboxes.
 
-CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'title', 'companyName', 'personaTitle', 'keyOverlaps', 'criticalGaps', 'coverLetter', 'coachingStrategy', and all properties within 'optimizedBulletPoints') in the "${targetLang}" language. 
+CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'title', 'companyName', 'personaTitle', 'keyOverlaps', 'criticalGaps', 'coverLetter', 'coachingStrategy', and all properties within 'optimizedBulletPoints') in the "${targetLang}" language.
 The system prompt ('personaSystemPrompt') can contain instructions configured for the sandbox, but the mock interviewer in that prompt should also converse in "${targetLang}".
 
 CRITICAL SPEED & CONCISENESS LIMITS:
@@ -314,10 +304,15 @@ Construct the response conforming strictly to the responseSchema object. Use cle
       )
     ]);
 
-    return Response.json(JSON.parse(response.text || "{}"));
+    const parsed = JSON.parse(response.text || "{}");
+
+    if (mode === "resume") {
+      return Response.json({ resumeData: parsed });
+    }
+    return Response.json(parsed);
   } catch (error: any) {
     console.error("Architect function error:", error);
-    
+
     const errStr = error?.message || String(error);
     let friendlyError = errStr;
 
@@ -357,8 +352,8 @@ AI-tjänsten är tillfälligt hastighetsbegränsad. Detta löser sig vanligtvis 
 3. Om dina dokument eller din jobbannons är mycket långa, försök att korta ner dem något.`;
       }
     }
-    
-    return Response.json({ 
+
+    return Response.json({
       error: friendlyError,
       stack: error?.stack,
       details: JSON.stringify(error)
