@@ -7,13 +7,7 @@ export default async (req: Request, context: Context) => {
   }
   try {
     const { systemPrompt, message, history } = await req.json();
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
-
-    const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+    const ai = new GoogleGenAI({});
 
     const contents: any[] = [];
     if (history && Array.isArray(history)) {
@@ -52,14 +46,13 @@ export default async (req: Request, context: Context) => {
       errStr.includes("limit")
     ) {
       // Default to English as the Sandbox prompt may be multilingually active
-      friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+      friendlyError = `⚠️ **AI Rate Limit Reached (Error 429)**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+The AI service is temporarily rate-limited. This usually resolves itself quickly.
 
-**How to easily resolve this:**
+**How to resolve this:**
 1. **Wait 15 seconds**, then type your message again.
-2. Avoid sending messages repeatedly in rapid succession.
-3. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+2. Avoid sending messages repeatedly in rapid succession.`;
     }
     
     return Response.json({ error: friendlyError }, { status: 500 });
