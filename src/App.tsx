@@ -93,6 +93,9 @@ const TRANSLATIONS = {
     cvBuilderSubtitle: "Professionellt CV skräddarsytt och optimerat för ATS-system och rekryterare.",
     downloadCVPdf: "Ladda ner CV (PDF)",
     downloadCoverPdf: "Ladda ner brev (PDF)",
+    downloadCoverWord: "Ladda ner brev (Word)",
+    generateCvNow: "Generera ATS-CV nu",
+    generatingCv: "Genererar ditt ATS-CV...",
     step8: "Konstruerar ATS-optimerat CV...",
     skipSplash: "Gå direkt till verktyget",
     splashTitle: "Karriärarkitekten",
@@ -171,6 +174,9 @@ const TRANSLATIONS = {
     cvBuilderSubtitle: "Professional resume crafted and optimized for ATS systems and headhunters.",
     downloadCVPdf: "Download Resume (PDF)",
     downloadCoverPdf: "Download Cover Letter (PDF)",
+    downloadCoverWord: "Download Cover Letter (Word)",
+    generateCvNow: "Generate ATS Resume now",
+    generatingCv: "Generating your ATS resume...",
     step8: "Constructing ATS-optimized resume...",
     skipSplash: "Go direct to workspace",
     splashTitle: "Career Architect",
@@ -189,6 +195,15 @@ const TRANSLATIONS = {
     themeDark: "Dark",
   }
 };
+
+// Escapes user/AI text before embedding it in generated download documents.
+function escapeForDoc(str: string): string {
+  return (str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
 
 export default function App() {
   // Splash Screen State & Countdown
@@ -230,6 +245,9 @@ export default function App() {
   const [alignStep, setAlignStep] = useState("");
   const [alignError, setAlignError] = useState<string | null>(null);
   const [result, setResult] = useState<AlignmentResult | null>(null);
+  // Resolved job text (incl. any crawled URL content) kept for one-click CV retry.
+  const [lastJobText, setLastJobText] = useState("");
+  const [isGeneratingCv, setIsGeneratingCv] = useState(false);
 
   // Internal Active TAB Interface View
   const [activeTab, setActiveTab] = useState<"match" | "cover-letter" | "resume-bullets" | "system-prompt" | "playground" | "ats-cv">("match");
@@ -555,6 +573,10 @@ export default function App() {
         }
       }
 
+      // Persist the fully-resolved job text so the ATS CV can be re-generated
+      // on demand without re-running the whole pipeline.
+      setLastJobText(resolvedJobText);
+
       // 2. Step animations for visual pacing & real progress state
       setAlignStep(t.step3); // "Analyserar semantiska nyckelordsöverskott..."
       await new Promise((resolve) => setTimeout(resolve, 400));
@@ -582,7 +604,7 @@ export default function App() {
       };
 
       // Resilient fetch helper with exponential backoff on 429 / resource exhaust limit
-      const fetchWithRetry = async (mode: "core" | "materials", retriesLeft = 2): Promise<Response> => {
+      const fetchWithRetry = async (mode: "core" | "materials" | "resume", retriesLeft = 2): Promise<Response> => {
         try {
           const res = await fetch("/api/architect", {
             method: "POST",
@@ -596,11 +618,22 @@ export default function App() {
             }),
           });
           
-          if (res.status === 429 || (res.status === 500 && await isQuotaError(res.clone()))) {
+          if (
+            res.status === 429 ||
+            res.status === 502 ||
+            res.status === 503 ||
+            res.status === 504 ||
+            (res.status === 500 && await isQuotaError(res.clone()))
+          ) {
             if (retriesLeft > 0) {
-              const retryMsg = lang === "en" 
-                ? `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...` 
-                : `⚠️ Kvotgräns nådd för ${mode === "core" ? "matchningsrapport" : "ansökningshandlingar"}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`;
+              const isTimeout = res.status === 502 || res.status === 503 || res.status === 504;
+              const retryMsg = isTimeout
+                ? (lang === "en"
+                    ? `⏳ The server took too long for ${mode} generation. Retrying in 4 seconds (${retriesLeft} retries left)...`
+                    : `⏳ Servern tog för lång tid för ${mode === "core" ? "matchningsrapport" : "ansökningshandlingar"}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`)
+                : (lang === "en"
+                    ? `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...`
+                    : `⚠️ Kvotgräns nådd för ${mode === "core" ? "matchningsrapport" : "ansökningshandlingar"}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`);
               setAlignStep(retryMsg);
               await new Promise((resolve) => setTimeout(resolve, 4000));
               setAlignStep(mode === "core" ? t.step3 : t.step5);
@@ -701,21 +734,103 @@ export default function App() {
   };
 
 
+  // One-click ATS CV (re)generation — used both as an automatic safety net and
+  // a manual retry if the first pass was interrupted (e.g. a transient limit).
+  const generateResumeOnly = async () => {
+    if (isGeneratingCv) return;
+    setIsGeneratingCv(true);
+    try {
+      const res = await fetch("/api/architect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          documentsPasted,
+          uploadedFiles,
+          jobDescription: lastJobText || jobDescription,
+          lang,
+          mode: "resume",
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.resumeData) {
+          setResult((prev) => (prev ? { ...prev, resumeData: data.resumeData } : prev));
+          setActiveTab("ats-cv");
+        }
+      }
+    } catch (_) {
+      // Non-fatal: the user can simply click again.
+    } finally {
+      setIsGeneratingCv(false);
+    }
+  };
+
+  // Polished, recruiter-grade cover-letter document. Reuses the candidate's own
+  // contact details (from the generated CV) for a proper letterhead when present.
+  const buildCoverLetterDoc = (forWord: boolean): string => {
+    if (!result) return "";
+    const rd = result.resumeData;
+    const candidate = rd?.name ? escapeForDoc(rd.name) : "";
+    const role = rd?.targetRole ? escapeForDoc(rd.targetRole) : escapeForDoc(result.title);
+    const contactBits = rd
+      ? [rd.contact?.email, rd.contact?.phone, rd.contact?.location, rd.contact?.linkedin]
+          .filter(Boolean)
+          .map((c) => escapeForDoc(c as string))
+          .join("&nbsp;&nbsp;•&nbsp;&nbsp;")
+      : "";
+    const today = new Date().toLocaleDateString(lang === "sv" ? "sv-SE" : "en-GB", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+    // Render light markdown (bold/italic) and paragraph breaks safely.
+    const bodyHtml = escapeForDoc(result.coverLetter)
+      .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*(?!\*)(.*?)\*(?!\*)/g, "$1<em>$2</em>")
+      .replace(/\n{2,}/g, "</p><p>")
+      .replace(/\n/g, "<br>");
+
+    const htmlOpen = forWord
+      ? `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset="utf-8"><!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View><w:Zoom>100</w:Zoom></w:WordDocument></xml><![endif]-->`
+      : `<!DOCTYPE html><html lang="${lang}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${role} – ${escapeForDoc(result.companyName)}</title>`;
+
+    const printBar = forWord
+      ? ""
+      : `<div class="print-bar no-print"><button class="print-btn" onclick="window.print()">🖨 ${
+          lang === "sv" ? "Spara som PDF / Skriv ut" : "Save as PDF / Print"
+        }</button></div>`;
+
+    return `${htmlOpen}
+<style>
+  @page { size: 21cm 29.7cm; margin: 2cm 2.2cm; }
+  body { font-family: 'Georgia','Times New Roman',serif; font-size: 11.5pt; line-height: 1.7; color: #1a1a2e; max-width: 720px; margin: 0 auto; padding: 36px 30px; background:#fff; }
+  .lh-name { font-size: 19pt; font-weight: bold; color: #1a365d; letter-spacing: -0.3px; }
+  .lh-role { font-size: 11pt; color: #2b6cb0; font-weight: bold; margin-top: 2px; }
+  .lh-contact { font-size: 9pt; color: #555; margin-top: 6px; }
+  .rule { border: 0; border-top: 1.5px solid #2b6cb0; margin: 14px 0 20px; }
+  .meta { font-size: 10pt; color: #444; margin-bottom: 18px; }
+  .meta strong { color: #1a202c; }
+  p { margin: 0 0 12px; text-align: justify; }
+  .sign { margin-top: 22px; }
+  .print-bar { text-align:center; padding: 12px; background: #f7fafc; border-bottom: 1px solid #e2e8f0; max-width:none; margin:-36px -30px 24px; }
+  .print-btn { background:#2b6cb0; color:#fff; border:none; padding:8px 20px; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; }
+  @media print { body { margin: 0; padding: 0; } .no-print { display:none !important; } }
+</style></head><body>
+${printBar}
+${candidate ? `<div class="lh-name">${candidate}</div>` : ""}
+${candidate ? `<div class="lh-role">${role}</div>` : ""}
+${contactBits ? `<div class="lh-contact">${contactBits}</div>` : ""}
+${candidate ? `<hr class="rule">` : ""}
+<div class="meta">${today}<br><strong>${escapeForDoc(result.companyName)}</strong>${
+      result.title ? `<br>${lang === "sv" ? "Avseende" : "Re"}: ${escapeForDoc(result.title)}` : ""
+    }</div>
+<p>${bodyHtml}</p>
+</body></html>`;
+  };
+
   const downloadCoverLetterPDF = () => {
     if (!result) return;
-    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Cover Letter</title>
-<style>
-  body { font-family: Georgia, serif; font-size: 11pt; line-height: 1.7; color: #1a1a1a; max-width: 700px; margin: 40px auto; padding: 0 30px; }
-  h1 { font-size: 14pt; color: #1a365d; border-bottom: 1px solid #ccc; padding-bottom: 8px; margin-bottom: 20px; }
-  @page { size: A4; margin: 20mm; }
-  @media print { body { margin: 0; } }
-  .print-bar { text-align:center; padding: 12px; background: #f7fafc; border-bottom: 1px solid #e2e8f0; }
-  .print-btn { background:#2b6cb0; color:#fff; border:none; padding:8px 20px; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; }
-</style></head><body>
-<div class="print-bar"><button class="print-btn" onclick="window.print()">🖨 Save as PDF / Print</button></div>
-<h1>${result.title} @ ${result.companyName}</h1>
-<div style="white-space:pre-wrap">${result.coverLetter.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.*?)\*/g, '<em>$1</em>')}</div>
-</body></html>`;
+    const html = buildCoverLetterDoc(false);
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const printWin = window.open(url, "_blank", "width=860,height=750,scrollbars=yes");
@@ -724,6 +839,19 @@ export default function App() {
         setTimeout(() => { printWin.print(); URL.revokeObjectURL(url); }, 600);
       });
     }
+  };
+
+  // Word (.doc) cover letter — generated only on click.
+  const downloadCoverLetterWord = () => {
+    if (!result) return;
+    const html = buildCoverLetterDoc(true);
+    const blob = new Blob(["﻿", html], { type: "application/msword" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Cover-Letter-${result.companyName.replace(/\s+/g, "-")}.doc`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
   const downloadOptimizedBullets = () => {
     if (!result) return;
@@ -1541,6 +1669,9 @@ export default function App() {
                               <button onClick={downloadCoverLetterPDF} className="px-2.5 py-1.5 border border-neutral-200 dark:border-neutral-700 rounded-lg text-xs font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors flex items-center gap-1.5">
                                 <FileDown size={14} /> {t.downloadCoverPdf}
                               </button>
+                              <button onClick={downloadCoverLetterWord} className="px-2.5 py-1.5 border border-neutral-200 dark:border-neutral-700 rounded-lg text-xs font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors flex items-center gap-1.5">
+                                <FileText size={14} /> {t.downloadCoverWord}
+                              </button>
                           </div>
                         </div>
 
@@ -1640,9 +1771,28 @@ export default function App() {
                   lang={lang}
                 />
               ) : (
-                <div className="flex flex-col items-center justify-center py-16 text-neutral-400">
-                  <span className="text-4xl mb-3">📄</span>
-                  <p className="text-sm">{lang === "sv" ? "CV genereras automatiskt när du kör en analys." : "Resume will be generated automatically when you run an analysis."}</p>
+                <div className="flex flex-col items-center justify-center py-16 text-center gap-4">
+                  <span className="text-4xl">📄</span>
+                  <p className="text-sm text-neutral-500 dark:text-neutral-400 max-w-sm">
+                    {isGeneratingCv
+                      ? t.generatingCv
+                      : (lang === "sv"
+                          ? "CV:t genereras automatiskt. Om det inte dök upp kan du skapa det här med ett klick."
+                          : "Your resume is generated automatically. If it didn't appear, build it here in one click.")}
+                  </p>
+                  <button
+                    type="button"
+                    disabled={isGeneratingCv}
+                    onClick={generateResumeOnly}
+                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-lg transition-colors shadow flex items-center gap-2"
+                  >
+                    {isGeneratingCv ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="w-4 h-4" />
+                    )}
+                    {isGeneratingCv ? t.generatingCv : t.generateCvNow}
+                  </button>
                 </div>
               )}
             </div>
