@@ -7,13 +7,23 @@ export default async (req: Request, context: Context) => {
   }
   try {
     const { systemPrompt, message, history } = await req.json();
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
 
-    const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+    // Prefer the Netlify AI Gateway; fall back to the user's direct Gemini key.
+    const preferGateway = (process.env.AI_USE_GATEWAY ?? "true") !== "false";
+    const gatewayReady = !!(process.env.GEMINI_API_KEY && process.env.GOOGLE_GEMINI_BASE_URL);
+    const userKey = process.env.USER_GEMINI_API_KEY;
+
+    let ai: GoogleGenAI;
+    if (preferGateway && gatewayReady) {
+      ai = new GoogleGenAI({});
+    } else if (userKey) {
+      delete process.env.GOOGLE_GEMINI_BASE_URL;
+      ai = new GoogleGenAI({ apiKey: userKey });
+    } else {
+      ai = new GoogleGenAI({});
+    }
+
+    const MODEL = process.env.AI_MODEL || "gemini-2.5-flash";
 
     const contents: any[] = [];
     if (history && Array.isArray(history)) {
@@ -29,12 +39,17 @@ export default async (req: Request, context: Context) => {
       parts: [{ text: message }]
     });
 
+    // Disable Gemini "thinking" for flash models to keep chat replies fast and
+    // inside the 26s function limit (the default thinking pass adds heavy latency).
+    const chatConfig: any = { systemInstruction: systemPrompt };
+    if (/flash/i.test(MODEL)) {
+      chatConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
+
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: MODEL,
       contents: contents,
-      config: {
-        systemInstruction: systemPrompt,
-      }
+      config: chatConfig
     });
 
     return Response.json({ reply: response.text || "" });

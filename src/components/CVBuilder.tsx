@@ -1,5 +1,5 @@
 import React from "react";
-import { Download } from "lucide-react";
+import { Download, FileText } from "lucide-react";
 import { ResumeData } from "../types";
 
 interface CVBuilderProps {
@@ -280,12 +280,83 @@ function escapeHtml(str: string): string {
     .replace(/"/g, "&quot;");
 }
 
+// Word-compatible document (.doc). MS Word ignores flexbox, CSS grid and
+// gradients, so this uses a deliberately conservative, fully-editable layout
+// with solid dark text — guaranteeing the document renders correctly and stays
+// editable in Word / Google Docs. Generated only when the user clicks download.
+const generateWordDoc = (resumeData: ResumeData, lang: "sv" | "en"): string => {
+  const { name, targetRole, contact, summary, experience, skills, education, certifications, languages, achievements } = resumeData;
+  const isSv = lang === "sv";
+
+  const labels = {
+    summary: isSv ? "Profil" : "Professional Summary",
+    experience: isSv ? "Erfarenhet" : "Professional Experience",
+    skills: isSv ? "Kompetenser" : "Skills",
+    education: isSv ? "Utbildning" : "Education",
+    certs: isSv ? "Certifieringar" : "Certifications",
+    langs: isSv ? "Språk" : "Languages",
+    achievements: isSv ? "Prestationer" : "Key Achievements",
+    technical: isSv ? "Teknisk" : "Technical",
+    tools: isSv ? "Verktyg & Plattformar" : "Tools & Platforms",
+    soft: isSv ? "Kompetenser" : "Competencies",
+  };
+
+  const contactLine = [contact.email, contact.phone, contact.location, contact.linkedin, contact.website]
+    .filter(Boolean).map((c) => escapeHtml(c as string)).join("&nbsp;&nbsp;•&nbsp;&nbsp;");
+
+  const section = (title: string, inner: string) => (inner ? `<p class="h">${title}</p>${inner}` : "");
+
+  return `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+<head><meta charset="utf-8">
+<!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View><w:Zoom>100</w:Zoom><w:DoNotOptimizeForBrowser/></w:WordDocument></xml><![endif]-->
+<style>
+  @page Section1 { size: 21cm 29.7cm; margin: 1.6cm 1.9cm; }
+  div.Section1 { page: Section1; }
+  body { font-family: 'Calibri','Arial',sans-serif; font-size: 10.5pt; color: #1a1a2e; line-height: 1.4; }
+  .name { font-size: 22pt; font-weight: bold; color: #1a365d; margin: 0; }
+  .role { font-size: 12pt; font-weight: bold; color: #2b6cb0; margin: 2pt 0 0; }
+  .contact { font-size: 9pt; color: #444; margin: 5pt 0 0; }
+  p.h { font-size: 10pt; font-weight: bold; color: #1a365d; text-transform: uppercase; letter-spacing: 1pt; border-bottom: 1pt solid #2b6cb0; padding-bottom: 2pt; margin: 15pt 0 6pt; }
+  .summary { text-align: justify; margin: 0; }
+  .exp-company { font-weight: bold; color: #1a202c; }
+  .exp-role { color: #276749; font-style: italic; }
+  .meta { color: #666; font-size: 9pt; }
+  ul { margin: 3pt 0 7pt 17pt; padding: 0; }
+  li { margin-bottom: 2pt; }
+</style></head>
+<body><div class="Section1">
+  <p class="name">${escapeHtml(name)}</p>
+  <p class="role">${escapeHtml(targetRole)}</p>
+  ${contactLine ? `<p class="contact">${contactLine}</p>` : ""}
+
+  ${summary ? section(labels.summary, `<p class="summary">${escapeHtml(summary)}</p>`) : ""}
+
+  ${experience && experience.length > 0 ? section(labels.experience, experience.map((exp) => `
+    <p style="margin:7pt 0 0;"><span class="exp-company">${escapeHtml(exp.company)}</span>&nbsp;&mdash;&nbsp;<span class="exp-role">${escapeHtml(exp.role)}${exp.location ? ", " + escapeHtml(exp.location) : ""}</span><br><span class="meta">${escapeHtml(exp.period)}</span></p>
+    ${exp.bullets && exp.bullets.length > 0 ? `<ul>${exp.bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul>` : ""}`).join("")) : ""}
+
+  ${(skills.technical?.length > 0 || skills.tools?.length > 0 || skills.soft?.length > 0) ? section(labels.skills, `
+    ${skills.technical?.length > 0 ? `<p style="margin:2pt 0;"><b>${labels.technical}:</b> ${skills.technical.map((s) => escapeHtml(s)).join(", ")}</p>` : ""}
+    ${skills.tools?.length > 0 ? `<p style="margin:2pt 0;"><b>${labels.tools}:</b> ${skills.tools.map((s) => escapeHtml(s)).join(", ")}</p>` : ""}
+    ${skills.soft?.length > 0 ? `<p style="margin:2pt 0;"><b>${labels.soft}:</b> ${skills.soft.map((s) => escapeHtml(s)).join(", ")}</p>` : ""}`) : ""}
+
+  ${education && education.length > 0 ? section(labels.education, education.map((edu) => `<p style="margin:3pt 0;"><b>${escapeHtml(edu.degree)}</b>&nbsp;&mdash;&nbsp;${escapeHtml(edu.institution)}${edu.gpa ? ", GPA " + escapeHtml(edu.gpa) : ""} <span class="meta">(${escapeHtml(edu.year)})</span></p>`).join("")) : ""}
+
+  ${certifications?.length > 0 ? section(labels.certs, `<ul>${certifications.map((c) => `<li>${escapeHtml(c)}</li>`).join("")}</ul>`) : ""}
+
+  ${languages?.length > 0 ? section(labels.langs, `<ul>${languages.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>`) : ""}
+
+  ${achievements?.length > 0 ? section(labels.achievements, `<ul>${achievements.map((a) => `<li>${escapeHtml(a)}</li>`).join("")}</ul>`) : ""}
+</div></body></html>`;
+};
+
 const CVBuilder: React.FC<CVBuilderProps> = ({ resumeData, companyName, lang }) => {
   const { name, targetRole, contact, summary, experience, skills, education, certifications, languages, achievements } = resumeData;
   const isSv = lang === "sv";
 
   const t = {
     downloadPDF: isSv ? "Ladda ner CV som PDF" : "Download Resume as PDF",
+    downloadWord: isSv ? "Ladda ner som Word" : "Download as Word",
     atsNote: isSv ? "ATS-optimerat CV anpassat för" : "ATS-optimized resume tailored for",
     summarySection: isSv ? "Profil" : "Professional Summary",
     experienceSection: isSv ? "Erfarenhet" : "Professional Experience",
@@ -314,6 +385,18 @@ const CVBuilder: React.FC<CVBuilderProps> = ({ resumeData, companyName, lang }) 
     }
   };
 
+  // Word (.doc) export — generated only on click, no document processing before.
+  const handleDownloadWord = () => {
+    const html = generateWordDoc(resumeData, lang);
+    const blob = new Blob(["﻿", html], { type: "application/msword" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Resume-${(name || "CV").replace(/\s+/g, "-")}.doc`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const SectionHeading: React.FC<{ label: string }> = ({ label }) => (
     <h2 className="text-[9px] font-extrabold uppercase tracking-[1.6px] text-blue-900 dark:text-blue-400 border-b border-blue-200 dark:border-blue-800 pb-1.5 mb-3">
       {label}
@@ -327,13 +410,22 @@ const CVBuilder: React.FC<CVBuilderProps> = ({ resumeData, companyName, lang }) 
         <div className="text-xs text-emerald-600 dark:text-emerald-400 font-mono bg-emerald-50 dark:bg-emerald-900/20 px-3 py-1.5 rounded-full border border-emerald-200 dark:border-emerald-800">
           {t.atsNote} <strong>{companyName}</strong>
         </div>
-        <button
-          onClick={handleDownloadPDF}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors shadow"
-        >
-          <Download size={14} />
-          {t.downloadPDF}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleDownloadWord}
+            className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-200 border border-neutral-300 dark:border-neutral-700 text-sm font-semibold rounded-lg transition-colors shadow-sm"
+          >
+            <FileText size={14} />
+            {t.downloadWord}
+          </button>
+          <button
+            onClick={handleDownloadPDF}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors shadow"
+          >
+            <Download size={14} />
+            {t.downloadPDF}
+          </button>
+        </div>
       </div>
 
       {/* ── CV CARD ── */}

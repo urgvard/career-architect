@@ -35,18 +35,35 @@ export default async (req: Request, context: Context) => {
       }, { status: 400 });
     }
 
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    // ── AI provider resolution ───────────────────────────────────────────────
+    // Prefer the Netlify AI Gateway: no rate-limited free-tier key, access to
+    // premium models, and requests billed to the site's Netlify credits. Netlify
+    // injects GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL automatically in production.
+    // Fall back to a direct user-supplied key (USER_GEMINI_API_KEY) for local dev
+    // or when the gateway is explicitly disabled via AI_USE_GATEWAY="false".
+    const preferGateway = (process.env.AI_USE_GATEWAY ?? "true") !== "false";
+    const gatewayReady = !!(process.env.GEMINI_API_KEY && process.env.GOOGLE_GEMINI_BASE_URL);
+    const userKey = process.env.USER_GEMINI_API_KEY;
+
+    let ai: GoogleGenAI;
+    if (preferGateway && gatewayReady) {
+      // Zero-config: the SDK auto-detects the injected gateway env vars.
+      ai = new GoogleGenAI({});
+    } else if (userKey) {
+      // Direct Google API with the user's own key (explicit key wins over env).
+      delete process.env.GOOGLE_GEMINI_BASE_URL;
+      ai = new GoogleGenAI({ apiKey: userKey });
+    } else if (gatewayReady) {
+      ai = new GoogleGenAI({});
+    } else {
       return Response.json({
-        error: "USER_GEMINI_API_KEY is not defined in Netlify environment variables."
+        error: "No AI provider configured. Enable the Netlify AI Gateway or set USER_GEMINI_API_KEY."
       }, { status: 500 });
     }
 
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
-
-    const ai = new GoogleGenAI({ apiKey: apiKey });
+    // Single switch point for the model. Change AI_MODEL in the Netlify env to
+    // swap models instantly (see README / results for the recommended list).
+    const MODEL = process.env.AI_MODEL || "gemini-2.5-flash";
 
     let systemMetaConfigPrompt = "";
     let responseSchema: any = null;
@@ -299,15 +316,50 @@ ${resolvedJobText.trim()}
 
 Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside appropriate text fields.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: modelingPayload,
-      config: {
-        systemInstruction: systemMetaConfigPrompt,
-        responseMimeType: "application/json",
-        responseSchema: responseSchema
+    // ── Latency / timeout control (root cause of the 504) ────────────────────
+    // The function is already at Netlify's 26s synchronous ceiling, so any call
+    // that runs longer is killed by the platform and surfaces as a raw 504.
+    // Two safeguards keep us inside that budget:
+    //   1. Disable Gemini "thinking" for flash-class models. It is on by default
+    //      and is by far the biggest source of latency; turning it off typically
+    //      cuts response time by 10-20s with no quality loss for this task.
+    //      (gemini-2.5-pro cannot disable thinking, so we only apply it to flash.)
+    //   2. Abort the request a beat before the platform timeout so we can return
+    //      a clean, retryable JSON message instead of an opaque 504.
+    const isFlashModel = /flash/i.test(MODEL);
+
+    const generationConfig: any = {
+      systemInstruction: systemMetaConfigPrompt,
+      responseMimeType: "application/json",
+      responseSchema: responseSchema
+    };
+    if (isFlashModel) {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
+
+    const controller = new AbortController();
+    const timeoutMs = 24000; // just under the 26s function ceiling
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    generationConfig.abortSignal = controller.signal;
+
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: MODEL,
+        contents: modelingPayload,
+        config: generationConfig
+      });
+    } catch (genErr: any) {
+      if (controller.signal.aborted) {
+        const timeoutMessage = lang === "en"
+          ? "⏳ The AI took too long to respond and the request timed out. This is usually transient — please click the button again. If it keeps happening, shorten your pasted documents or job description slightly to speed up generation."
+          : "⏳ AI:n tog för lång tid på sig och förfrågan tog timeout. Detta är oftast tillfälligt — klicka på knappen igen. Om det återkommer, korta ner dina inklistrade dokument eller jobbannonsen något för snabbare generering.";
+        return Response.json({ error: timeoutMessage, timeout: true }, { status: 504 });
       }
-    });
+      throw genErr;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     return Response.json(JSON.parse(response.text || "{}"));
   } catch (error: any) {
