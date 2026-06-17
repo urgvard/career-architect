@@ -109,6 +109,7 @@ const TRANSLATIONS = {
     themeLabel: "Tema",
     themeLight: "Ljust",
     themeDark: "Mörkt",
+    newCV: "Nytt CV",
   },
   en: {
     appTitle: "Career Architect",
@@ -187,6 +188,7 @@ const TRANSLATIONS = {
     themeLabel: "Theme",
     themeLight: "Light",
     themeDark: "Dark",
+    newCV: "New CV",
   }
 };
 
@@ -506,6 +508,21 @@ export default function App() {
     setUploadedFiles([]);
   };
 
+  // Reset the entire workspace and start a fresh resume process
+  const handleNewCV = () => {
+    setDocumentsPasted("");
+    setUploadedFiles([]);
+    setJobDescription("");
+    setJobUrl("");
+    setResult(null);
+    setAlignError(null);
+    setAlignStep("");
+    setIsAligning(false);
+    setCopiedStates({});
+    setActiveTab("match");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   // Run Document-to-Job alignment cognitive pipeline
   const handleAlignAndArchitect = async () => {
     const hasPastedDocs = !!documentsPasted.trim();
@@ -564,8 +581,9 @@ export default function App() {
 
       setAlignStep(t.step5); // "Syntetiserar professionella personliga brev..."
 
-      // Helper to check if a 500 error response is actually a Gemini quota error
-      const isQuotaError = async (resCopy: Response): Promise<boolean> => {
+      // Helper to check if a 500 error response is a retryable Gemini error
+      // (rate-limit / quota exhaustion, or model overload / high demand).
+      const isRetryableError = async (resCopy: Response): Promise<boolean> => {
         try {
           const data = await resCopy.json();
           const errStr = data?.error || "";
@@ -574,14 +592,18 @@ export default function App() {
             errStr.includes("RESOURCE_EXHAUSTED") ||
             errStr.includes("quota") ||
             errStr.includes("Quota") ||
-            errStr.includes("limit")
+            errStr.includes("limit") ||
+            errStr.includes("503") ||
+            errStr.includes("UNAVAILABLE") ||
+            errStr.includes("overloaded") ||
+            errStr.includes("high demand")
           );
         } catch (_) {
           return false;
         }
       };
 
-      // Resilient fetch helper with exponential backoff on 429 / resource exhaust limit
+      // Resilient fetch helper with exponential backoff on rate-limit / overload errors
       const fetchWithRetry = async (mode: "core" | "materials", retriesLeft = 2): Promise<Response> => {
         try {
           const res = await fetch("/api/architect", {
@@ -595,8 +617,8 @@ export default function App() {
               mode,
             }),
           });
-          
-          if (res.status === 429 || (res.status === 500 && await isQuotaError(res.clone()))) {
+
+          if (res.status === 429 || res.status === 503 || (res.status === 500 && await isRetryableError(res.clone()))) {
             if (retriesLeft > 0) {
               const retryMsg = lang === "en" 
                 ? `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...` 
@@ -950,6 +972,16 @@ export default function App() {
 
           {/* DUAL TOGGLE HEADERS (LANGUAGE & THEME) */}
           <div className="flex flex-wrap items-center gap-4 bg-neutral-900 border border-neutral-800 rounded-xl p-2 shrink-0 shadow-lg">
+            {/* New CV reset trigger */}
+            <button
+              type="button"
+              onClick={handleNewCV}
+              title={t.newCV}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-black tracking-wide transition-colors duration-200 shadow cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>{t.newCV}</span>
+            </button>
             {/* Language Toggle */}
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider pl-1.5 hidden sm:inline-flex items-center gap-1">
