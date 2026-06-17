@@ -592,7 +592,7 @@ export default function App() {
         }
       };
 
-      // Resilient fetch helper with backoff on transient 429/503 limits.
+      // Resilient fetch helper with backoff on transient 429/503 limits and 502/504 timeouts.
       const fetchWithRetry = async (mode: "core" | "materials" | "resume", retriesLeft = 2): Promise<Response> => {
         try {
           const res = await fetch("/api/architect", {
@@ -607,7 +607,13 @@ export default function App() {
             }),
           });
 
-          if (res.status === 429 || res.status === 503 || (res.status === 500 && await isQuotaError(res.clone()))) {
+          if (
+            res.status === 429 ||
+            res.status === 502 ||
+            res.status === 503 ||
+            res.status === 504 ||
+            (res.status === 500 && await isQuotaError(res.clone()))
+          ) {
             if (retriesLeft > 0) {
               const modeLabelSv = mode === "core" ? "matchningsrapport" : mode === "resume" ? "CV" : "ansökningshandlingar";
               const retryMsg = lang === "en"
@@ -635,26 +641,40 @@ export default function App() {
         fetchWithRetry("materials")
       ]);
 
-      if (!coreRes.ok) {
-        let errMsg = `Pipeline failed: Server status ${coreRes.status}`;
+      // Platform timeouts (502/504) arrive with no JSON body, so surface a friendly,
+      // localized explanation instead of a bare "Server status 504".
+      const timeoutMessage = lang === "en"
+        ? `⚠️ **The request took too long and timed out**
+
+Generating your documents exceeded the time limit. This usually happens when the pasted documents or job advert are very long.
+
+**How to resolve this:**
+1. **Click the button again** — a fresh attempt often completes within the limit.
+2. **Trim the input slightly** (remove duplicated text or very long sections) so the AI has less to process.`
+        : `⚠️ **Förfrågan tog för lång tid och avbröts**
+
+Att skapa dina dokument överskred tidsgränsen. Det händer oftast när dokumenten eller jobbannonsen är mycket långa.
+
+**Så här löser du det:**
+1. **Klicka på knappen igen** – ett nytt försök går oftast igenom inom gränsen.
+2. **Korta ner texten något** (ta bort dubblerad text eller mycket långa avsnitt) så att AI:n har mindre att bearbeta.`;
+
+      const buildPipelineError = async (res: Response): Promise<string> => {
+        if (res.status === 502 || res.status === 504) return timeoutMessage;
+        let errMsg = `Pipeline failed: Server status ${res.status}`;
         try {
-          const errData = await coreRes.json();
-          if (errData && errData.error) {
-            errMsg = errData.error;
-          }
+          const errData = await res.json();
+          if (errData && errData.error) errMsg = errData.error;
         } catch (_) {}
-        throw new Error(errMsg);
+        return errMsg;
+      };
+
+      if (!coreRes.ok) {
+        throw new Error(await buildPipelineError(coreRes));
       }
 
       if (!matRes.ok) {
-        let errMsg = `Pipeline failed: Server status ${matRes.status}`;
-        try {
-          const errData = await matRes.json();
-          if (errData && errData.error) {
-            errMsg = errData.error;
-          }
-        } catch (_) {}
-        throw new Error(errMsg);
+        throw new Error(await buildPipelineError(matRes));
       }
 
       const coreData = await coreRes.json();

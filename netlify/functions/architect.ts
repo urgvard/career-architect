@@ -318,37 +318,52 @@ ${resolvedJobText.trim()}
 
 Ground every claim in the candidate documents — never fabricate. Mirror the job description's terminology and keywords. Respond strictly as JSON conforming to the responseSchema, using clean, native-fluent ${targetLang} Markdown inside text fields.`;
 
-    // The full-CV ("resume") generation is by far the heaviest schema. With Gemini's
-    // default "thinking" enabled it routinely takes ~16s and can blow past the 26s
-    // function timeout (504), which is the main reason the CV failed to generate.
-    // Disabling thinking for this extraction-style task cuts it to ~4-5s and keeps it
-    // comfortably inside the timeout, while the persuasive analysis/letter modes keep
-    // thinking for quality.
+    // The 504 the user reported is a *function timeout*, not a quota or model problem:
+    // synchronous Netlify functions are hard-capped at 26s (see netlify.toml), and Gemini's
+    // default dynamic "thinking" routinely adds ~10-16s per call. On longer résumés / job
+    // adverts that tips a single generation past 26s and Netlify kills it with a 504.
+    // Switching to a different (or "free") model would not fix this — the wall is wall-clock
+    // time inside the function, not the per-key cost or rate limit.
+    //
+    // The fix is to bound generation time on every mode:
+    //   - resume (heavy extraction schema): thinking off entirely (~4-5s).
+    //   - core / materials (persuasive writing): a small, fixed thinking budget instead of
+    //     the unbounded default, so we keep some reasoning quality while capping the long
+    //     "thinking" tail that caused the timeout.
+    // Both budgets are overridable via env so they can be tuned without a code change.
     const isResume = mode === "resume";
+    const thinkingBudget = isResume
+      ? Number(process.env.GEMINI_RESUME_THINKING_BUDGET ?? 0)
+      : Number(process.env.GEMINI_THINKING_BUDGET ?? 1024);
 
     const generationConfig: any = {
       systemInstruction: systemMetaConfigPrompt,
       responseMimeType: "application/json",
-      responseSchema: responseSchema
+      responseSchema: responseSchema,
+      thinkingConfig: { thinkingBudget }
     };
-    if (isResume) {
-      generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    }
 
     // Gemini frequently returns transient 503 "model is overloaded / high demand"
-    // (UNAVAILABLE) errors. Because the resume call is now fast, we can safely retry it
-    // a few times server-side so a momentary spike no longer silently drops the CV.
+    // (UNAVAILABLE) errors, and the gateway can surface a 504 / deadline blip. Because the
+    // calls are now time-bounded, we can safely retry a few times server-side so a momentary
+    // spike no longer silently drops a step.
     const isTransientOverload = (err: any): boolean => {
       const s = `${err?.message || ""} ${JSON.stringify(err || "")}`;
       return (
         s.includes("503") ||
+        s.includes("504") ||
         s.includes("UNAVAILABLE") ||
         s.includes("overloaded") ||
-        s.includes("high demand")
+        s.includes("high demand") ||
+        s.includes("deadline") ||
+        s.includes("DEADLINE_EXCEEDED") ||
+        s.includes("timeout")
       );
     };
 
-    const maxAttempts = isResume ? 3 : 1;
+    // Every mode is now fast enough that one quick retry still fits inside the 26s budget;
+    // the resume step keeps a couple of extra attempts since it is the most failure-prone.
+    const maxAttempts = isResume ? 3 : 2;
     let response: any = null;
     let lastErr: any = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -378,8 +393,32 @@ Ground every claim in the candidate documents — never fabricate. Mirror the jo
     
     const errStr = error?.message || String(error);
     let friendlyError = errStr;
-    
+
     if (
+      errStr.includes("504") ||
+      errStr.includes("deadline") ||
+      errStr.includes("DEADLINE_EXCEEDED") ||
+      errStr.includes("timeout") ||
+      errStr.includes("aborted")
+    ) {
+      if (lang === "en") {
+        friendlyError = `⚠️ **The request took too long and timed out**
+
+Generating your documents exceeded the time limit. This usually happens when the pasted documents or job advert are very long.
+
+**How to resolve this:**
+1. **Click the button again** — a fresh attempt often completes within the limit.
+2. **Trim the input slightly** (remove duplicated text or very long sections) so the AI has less to process.`;
+      } else {
+        friendlyError = `⚠️ **Förfrågan tog för lång tid och avbröts**
+
+Att skapa dina dokument överskred tidsgränsen. Det händer oftast när dokumenten eller jobbannonsen är mycket långa.
+
+**Så här löser du det:**
+1. **Klicka på knappen igen** – ett nytt försök går oftast igenom inom gränsen.
+2. **Korta ner texten något** (ta bort dubblerad text eller mycket långa avsnitt) så att AI:n har mindre att bearbeta.`;
+      }
+    } else if (
       errStr.includes("429") ||
       errStr.includes("RESOURCE_EXHAUSTED") ||
       errStr.includes("quota") ||
