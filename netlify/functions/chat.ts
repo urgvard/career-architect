@@ -1,45 +1,5 @@
 import type { Context, Config } from "@netlify/functions";
-import { GoogleGenAI } from "@google/genai";
-
-// Primary model, with a fallback used only when the primary stays unavailable.
-const PRIMARY_MODEL = "gemini-2.5-flash";
-const FALLBACK_MODEL = "gemini-2.0-flash";
-
-// A transient error is one worth retrying: model overload (503/UNAVAILABLE),
-// rate limiting (429), upstream 5xx, or a dropped connection.
-function isTransientError(err: any): boolean {
-  const haystack = `${err?.message || ""} ${err?.status || ""} ${(() => {
-    try { return JSON.stringify(err); } catch { return String(err); }
-  })()}`;
-  return /\b(503|502|500|429)\b|UNAVAILABLE|overloaded|high demand|RESOURCE_EXHAUSTED|ECONNRESET|ETIMEDOUT|fetch failed|socket hang up/i.test(
-    haystack
-  );
-}
-
-// Call generateContent with bounded exponential backoff. On a persistent
-// transient failure with the primary model, retry once on the fallback model.
-async function generateContentWithRetry(
-  ai: GoogleGenAI,
-  params: any,
-  { retries = 3, baseDelayMs = 400 }: { retries?: number; baseDelayMs?: number } = {}
-) {
-  let lastErr: any;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const useFallback = attempt === retries && params.model === PRIMARY_MODEL;
-    try {
-      return await ai.models.generateContent(
-        useFallback ? { ...params, model: FALLBACK_MODEL } : params
-      );
-    } catch (err: any) {
-      lastErr = err;
-      if (!isTransientError(err)) throw err;
-      if (attempt === retries) break;
-      const delay = baseDelayMs * 2 ** attempt + Math.floor(Math.random() * 250);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-  throw lastErr;
-}
+import { buildRoutes, generateContentResilient } from "../lib/gemini";
 
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
@@ -47,13 +7,16 @@ export default async (req: Request, context: Context) => {
   }
   try {
     const { systemPrompt, message, history } = await req.json();
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
 
-    const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+    // Resilient routes: the user's direct key first, then the managed Netlify
+    // AI Gateway as an automatic fallback when Google's direct endpoint is
+    // overloaded.
+    const routes = buildRoutes();
+    if (!routes.length) {
+      return Response.json({
+        error: "No Gemini route is configured. Set USER_GEMINI_API_KEY or enable the Netlify AI Gateway."
+      }, { status: 500 });
+    }
 
     const contents: any[] = [];
     if (history && Array.isArray(history)) {
@@ -69,8 +32,7 @@ export default async (req: Request, context: Context) => {
       parts: [{ text: message }]
     });
 
-    const response = await generateContentWithRetry(ai, {
-      model: PRIMARY_MODEL,
+    const response = await generateContentResilient(routes, {
       contents: contents,
       config: {
         systemInstruction: systemPrompt,
