@@ -314,15 +314,59 @@ ${resolvedJobText.trim()}
 
 Ground every claim in the candidate documents — never fabricate. Mirror the job description's terminology and keywords. Respond strictly as JSON conforming to the responseSchema, using clean, native-fluent ${targetLang} Markdown inside text fields.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: modelingPayload,
-      config: {
-        systemInstruction: systemMetaConfigPrompt,
-        responseMimeType: "application/json",
-        responseSchema: responseSchema
+    // The full-CV ("resume") generation is by far the heaviest schema. With Gemini's
+    // default "thinking" enabled it routinely takes ~16s and can blow past the 26s
+    // function timeout (504), which is the main reason the CV failed to generate.
+    // Disabling thinking for this extraction-style task cuts it to ~4-5s and keeps it
+    // comfortably inside the timeout, while the persuasive analysis/letter modes keep
+    // thinking for quality.
+    const isResume = mode === "resume";
+
+    const generationConfig: any = {
+      systemInstruction: systemMetaConfigPrompt,
+      responseMimeType: "application/json",
+      responseSchema: responseSchema
+    };
+    if (isResume) {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
+
+    // Gemini frequently returns transient 503 "model is overloaded / high demand"
+    // (UNAVAILABLE) errors. Because the resume call is now fast, we can safely retry it
+    // a few times server-side so a momentary spike no longer silently drops the CV.
+    const isTransientOverload = (err: any): boolean => {
+      const s = `${err?.message || ""} ${JSON.stringify(err || "")}`;
+      return (
+        s.includes("503") ||
+        s.includes("UNAVAILABLE") ||
+        s.includes("overloaded") ||
+        s.includes("high demand")
+      );
+    };
+
+    const maxAttempts = isResume ? 3 : 1;
+    let response: any = null;
+    let lastErr: any = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: modelingPayload,
+          config: generationConfig
+        });
+        break;
+      } catch (genErr: any) {
+        lastErr = genErr;
+        if (attempt < maxAttempts && isTransientOverload(genErr)) {
+          await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+          continue;
+        }
+        throw genErr;
       }
-    });
+    }
+    if (!response) {
+      throw lastErr || new Error("Generation failed without a response.");
+    }
 
     return Response.json(JSON.parse(response.text || "{}"));
   } catch (error: any) {

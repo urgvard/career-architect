@@ -231,6 +231,11 @@ export default function App() {
   const [alignError, setAlignError] = useState<string | null>(null);
   const [result, setResult] = useState<AlignmentResult | null>(null);
 
+  // Manual CV (re)generation fallback state — used when the automatic resume
+  // generation did not complete during the main pipeline.
+  const [isGeneratingCV, setIsGeneratingCV] = useState(false);
+  const [cvError, setCvError] = useState<string | null>(null);
+
   // Internal Active TAB Interface View
   const [activeTab, setActiveTab] = useState<"match" | "cover-letter" | "resume-bullets" | "system-prompt" | "playground" | "ats-cv">("match");
   const [copiedStates, setCopiedStates] = useState<{ [key: string]: boolean }>({});
@@ -564,14 +569,20 @@ export default function App() {
 
       setAlignStep(t.step5); // "Syntetiserar professionella personliga brev..."
 
-      // Helper to check if a 500 error response is actually a Gemini quota error
+      // Helper to check if a 500 error response is a transient/retryable Gemini error.
+      // Covers both quota (429/RESOURCE_EXHAUSTED) and the very common transient
+      // "model overloaded / high demand" 503 (UNAVAILABLE) responses.
       const isQuotaError = async (resCopy: Response): Promise<boolean> => {
         try {
           const data = await resCopy.json();
           const errStr = data?.error || "";
           return (
             errStr.includes("429") ||
+            errStr.includes("503") ||
             errStr.includes("RESOURCE_EXHAUSTED") ||
+            errStr.includes("UNAVAILABLE") ||
+            errStr.includes("overloaded") ||
+            errStr.includes("high demand") ||
             errStr.includes("quota") ||
             errStr.includes("Quota") ||
             errStr.includes("limit")
@@ -581,8 +592,8 @@ export default function App() {
         }
       };
 
-      // Resilient fetch helper with exponential backoff on 429 / resource exhaust limit
-      const fetchWithRetry = async (mode: "core" | "materials", retriesLeft = 2): Promise<Response> => {
+      // Resilient fetch helper with backoff on transient 429/503 limits.
+      const fetchWithRetry = async (mode: "core" | "materials" | "resume", retriesLeft = 2): Promise<Response> => {
         try {
           const res = await fetch("/api/architect", {
             method: "POST",
@@ -595,15 +606,16 @@ export default function App() {
               mode,
             }),
           });
-          
-          if (res.status === 429 || (res.status === 500 && await isQuotaError(res.clone()))) {
+
+          if (res.status === 429 || res.status === 503 || (res.status === 500 && await isQuotaError(res.clone()))) {
             if (retriesLeft > 0) {
-              const retryMsg = lang === "en" 
-                ? `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...` 
-                : `⚠️ Kvotgräns nådd för ${mode === "core" ? "matchningsrapport" : "ansökningshandlingar"}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`;
+              const modeLabelSv = mode === "core" ? "matchningsrapport" : mode === "resume" ? "CV" : "ansökningshandlingar";
+              const retryMsg = lang === "en"
+                ? `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...`
+                : `⚠️ Kvotgräns nådd för ${modeLabelSv}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`;
               setAlignStep(retryMsg);
               await new Promise((resolve) => setTimeout(resolve, 4000));
-              setAlignStep(mode === "core" ? t.step3 : t.step5);
+              setAlignStep(mode === "core" ? t.step3 : mode === "resume" ? (t.step8 || t.step5) : t.step5);
               return await fetchWithRetry(mode, retriesLeft - 1);
             }
           }
@@ -652,7 +664,7 @@ export default function App() {
       let resumeData: any = null;
       try {
         setAlignStep(t.step8 || "Building ATS resume...");
-        const resumeRes = await fetchWithRetry("resume");
+        const resumeRes = await fetchWithRetry("resume", 3);
         if (resumeRes.ok) {
           try { resumeData = await resumeRes.json(); } catch (_) {}
         }
@@ -676,6 +688,56 @@ export default function App() {
       setAlignError(err?.message || "Error during system alignment calculation.");
     } finally {
       setIsAligning(false);
+    }
+  };
+
+  // Manual CV generation — safety net for the ATS-CV tab when the automatic
+  // resume generation did not complete (e.g. a transient model overload that
+  // outlasted the in-pipeline retries). Re-runs only the "resume" mode and
+  // merges the result into the existing analysis.
+  const handleGenerateCV = async () => {
+    if (isGeneratingCV) return;
+    const jobText = jobDescription.trim();
+    if ((!documentsPasted.trim() && uploadedFiles.length === 0) || !jobText) {
+      setCvError(lang === "en"
+        ? "Run a full analysis first so the CV has documents and a job description to work from."
+        : "Kör en fullständig analys först så att CV:t har dokument och en jobbannons att utgå från.");
+      return;
+    }
+    setCvError(null);
+    setIsGeneratingCV(true);
+    try {
+      const res = await fetch("/api/architect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          documentsPasted,
+          uploadedFiles,
+          jobDescription: jobText,
+          lang,
+          mode: "resume",
+        }),
+      });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const data = await res.json();
+          if (data?.error) msg = data.error;
+        } catch (_) {}
+        throw new Error(msg);
+      }
+      const data = await res.json();
+      if (!data?.resumeData) {
+        throw new Error(lang === "en"
+          ? "The model returned no CV data. Please try again."
+          : "Modellen returnerade inget CV-innehåll. Försök igen.");
+      }
+      setResult((prev) => (prev ? { ...prev, resumeData: data.resumeData } : prev));
+    } catch (err: any) {
+      console.error("Manual CV generation failed:", err);
+      setCvError(err?.message || (lang === "en" ? "CV generation failed." : "CV-generering misslyckades."));
+    } finally {
+      setIsGeneratingCV(false);
     }
   };
 
@@ -1642,7 +1704,29 @@ export default function App() {
               ) : (
                 <div className="flex flex-col items-center justify-center py-16 text-neutral-400">
                   <span className="text-4xl mb-3">📄</span>
-                  <p className="text-sm">{lang === "sv" ? "CV genereras automatiskt när du kör en analys." : "Resume will be generated automatically when you run an analysis."}</p>
+                  <p className="text-sm text-center max-w-md">{lang === "sv" ? "CV genereras automatiskt när du kör en analys." : "Resume will be generated automatically when you run an analysis."}</p>
+                  {result && (
+                    <>
+                      <p className="text-xs text-neutral-400 mt-2 text-center max-w-md">
+                        {lang === "sv"
+                          ? "Genererades det inte? Skapa det manuellt här nedan."
+                          : "Didn't it generate? Create it manually below."}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleGenerateCV}
+                        disabled={isGeneratingCV}
+                        className="mt-4 px-4 py-2 rounded-md bg-neutral-800 text-white text-sm font-semibold hover:bg-neutral-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        {isGeneratingCV
+                          ? (lang === "sv" ? "Genererar CV…" : "Generating CV…")
+                          : (lang === "sv" ? "Generera CV" : "Generate CV")}
+                      </button>
+                      {cvError && (
+                        <p className="text-xs text-red-500 mt-3 text-center max-w-md whitespace-pre-wrap">{cvError}</p>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
             </div>
