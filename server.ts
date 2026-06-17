@@ -9,11 +9,18 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
-// Initialize Gemini SDK with custom user agent and key from env
+// Initialize Gemini SDK. Prefer the Netlify AI Gateway (injected by `netlify dev` and in
+// production) so requests are billed to Netlify credits with high account-level limits,
+// avoiding the personal free-tier key's 15 RPM / 250k TPM caps that caused 429 errors.
 const getGeminiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+  if (process.env.GOOGLE_GEMINI_BASE_URL) {
+    // Gateway path: the SDK auto-detects GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL.
+    // No custom headers — the gateway does not forward them to the provider.
+    return new GoogleGenAI({});
+  }
+  const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.warn("GEMINI_API_KEY environment variable is not defined");
+    console.warn("No AI Gateway and no GEMINI_API_KEY available");
   }
   return new GoogleGenAI({
     apiKey: apiKey || "",
@@ -24,6 +31,8 @@ const getGeminiClient = () => {
     },
   });
 };
+
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
 app.use(express.json({ limit: "15mb" })); // Increase limit for document uploads
 
@@ -62,7 +71,7 @@ async function fetchCleanUrl(urlStr: string): Promise<string> {
 
 // API: Check status of API Key
 app.get("/api/apiKeyStatus", (req, res) => {
-  const hasKey = !!process.env.GEMINI_API_KEY;
+  const hasKey = !!(process.env.GOOGLE_GEMINI_BASE_URL || process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY);
   res.json({ hasKey });
 });
 
@@ -296,7 +305,7 @@ ${resolvedJobText.trim()}
 Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside appropriate fields.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: GEMINI_MODEL,
       contents: modelingPayload,
       config: {
         systemInstruction: systemMetaConfigPrompt,
@@ -321,25 +330,23 @@ Construct the response conforming strictly to the responseSchema object. Use cle
       errStr.includes("limit")
     ) {
       if (lang === "en") {
-        friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **The AI service is busy right now (temporary rate limit)**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+The AI service hit a momentary capacity limit while generating your documents. This is temporary and resets within a minute.
 
-**How to easily resolve this:**
-1. **Wait 15 seconds**, then click the button again.
-2. Avoid clicking the button repeatedly in rapid succession.
-3. If your uploaded resume or pasted job description is exceptionally long, try shortening or summarizing the text slightly to reduce the token count.
-4. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+**How to resolve this:**
+1. **Wait about 15 seconds**, then click the button again.
+2. Avoid clicking repeatedly in quick succession — each run starts several AI requests at once.
+3. If your uploaded résumé or pasted job advert is very long, trimming it slightly lowers the load and helps it go through.`;
       } else {
-        friendlyError = `⚠️ **Begränsning i Google Gemini-kvot (Fel 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **AI-tjänsten är upptagen just nu (tillfällig gräns)**
 
-Du har tillfälligt överskridit gränserna för gratisnivån (som tillåter max 15 anrop per minut och 250 000 ord/tokens per minut).
+AI-tjänsten nådde en tillfällig kapacitetsgräns när dina dokument skapades. Detta är övergående och återställs inom en minut.
 
-**Så här löser du det enkelt:**
-1. **Vänta 15 sekunder** och klicka sedan på knappen igen.
-2. Undvik att klicka på knappen upprepade gånger i snabb följd.
-3. Om dina dokument eller din jobbannons är extremt långa, försök att korta ner dem något så att de inte överskrider gränsen.
-4. Om du använder en betald API-nyckel, säkerställ att den är korrekt konfigurerad under dina Netlify-miljövariabler eller .env-fil.`;
+**Så här löser du det:**
+1. **Vänta cirka 15 sekunder** och klicka sedan på knappen igen.
+2. Undvik att klicka upprepade gånger i snabb följd – varje körning startar flera AI-anrop samtidigt.
+3. Om din uppladdade meritförteckning eller jobbannons är mycket lång, korta ner den något för att minska belastningen.`;
       }
     }
     
@@ -374,7 +381,7 @@ app.post("/api/playground/chat", async (req, res) => {
     });
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: GEMINI_MODEL,
       contents: contents,
       config: {
         systemInstruction: systemPrompt,
@@ -397,14 +404,13 @@ app.post("/api/playground/chat", async (req, res) => {
       errStr.includes("Quota") ||
       errStr.includes("limit")
     ) {
-      friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+      friendlyError = `⚠️ **The AI service is busy right now (temporary rate limit)**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+The AI service hit a momentary capacity limit. This is temporary and resets within a minute.
 
-**How to easily resolve this:**
-1. **Wait 15 seconds**, then type your message again.
-2. Avoid sending messages repeatedly in rapid succession.
-3. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify environment variables or local .env file.`;
+**How to resolve this:**
+1. **Wait about 15 seconds**, then send your message again.
+2. Avoid sending messages repeatedly in rapid succession.`;
     }
     
     res.status(500).json({ error: friendlyError });

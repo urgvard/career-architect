@@ -35,18 +35,22 @@ export default async (req: Request, context: Context) => {
       }, { status: 400 });
     }
 
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return Response.json({
-        error: "USER_GEMINI_API_KEY is not defined in Netlify environment variables."
-      }, { status: 500 });
-    }
+    // Route inference through the Netlify AI Gateway rather than a personal free-tier
+    // Gemini key. The free tier's 15 requests/min and 250k tokens/min caps are the direct
+    // cause of the recurring 429 RESOURCE_EXHAUSTED errors — and because that quota lives
+    // on the key, not the model, switching to a different Gemini model would not avoid it.
+    // The gateway is billed to Netlify credits with far higher account-level limits, so
+    // routing through it is what actually removes the quota wall. The @google/genai SDK
+    // auto-detects the gateway-injected GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL; we only
+    // fall back to a directly supplied key when the gateway is unavailable (e.g. a plain
+    // local `node` run without `netlify dev`).
+    const ai = process.env.GOOGLE_GEMINI_BASE_URL
+      ? new GoogleGenAI({})
+      : new GoogleGenAI({ apiKey: process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "" });
 
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
-
-    const ai = new GoogleGenAI({ apiKey: apiKey });
+    // Model is overridable via env so it can be tuned without a code change. The gateway
+    // supports gemini-2.5-flash (fast, reliable for this JSON-structured workload) by default.
+    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
     // Shared, non-negotiable writing standard injected into every mode.
     // The single goal of all generated documentation is to earn the candidate an interview,
@@ -350,7 +354,7 @@ Ground every claim in the candidate documents — never fabricate. Mirror the jo
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         response = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: model,
           contents: modelingPayload,
           config: generationConfig
         });
@@ -383,25 +387,23 @@ Ground every claim in the candidate documents — never fabricate. Mirror the jo
       errStr.includes("limit")
     ) {
       if (lang === "en") {
-        friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **The AI service is busy right now (temporary rate limit)**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+The AI service hit a momentary capacity limit while generating your documents. This is temporary and resets within a minute.
 
-**How to easily resolve this:**
-1. **Wait 15 seconds**, then click the button again.
-2. Avoid clicking the button repeatedly in rapid succession.
-3. If your uploaded resume or pasted job description is exceptionally long, try shortening or summarizing the text slightly to reduce the token count.
-4. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+**How to resolve this:**
+1. **Wait about 15 seconds**, then click the button again.
+2. Avoid clicking repeatedly in quick succession — each run starts several AI requests at once.
+3. If your uploaded résumé or pasted job advert is very long, trimming it slightly lowers the load and helps it go through.`;
       } else {
-        friendlyError = `⚠️ **Begränsning i Google Gemini-kvot (Fel 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **AI-tjänsten är upptagen just nu (tillfällig gräns)**
 
-Du har tillfälligt överskridit gränserna för gratisnivån (som tillåter max 15 anrop per minut och 250 000 ord/tokens per minut).
+AI-tjänsten nådde en tillfällig kapacitetsgräns när dina dokument skapades. Detta är övergående och återställs inom en minut.
 
-**Så här löser du det enkelt:**
-1. **Vänta 15 sekunder** och klicka sedan på knappen igen.
-2. Undvik att klicka på knappen upprepade gånger i snabb följd.
-3. Om dina dokument eller din jobbannons är extremt långa, försök att korta ner dem något så att de inte överskrider gränsen.
-4. Om du använder en betald API-nyckel, säkerställ att den är korrekt konfigurerad under dina Netlify-miljövariabler eller .env-fil.`;
+**Så här löser du det:**
+1. **Vänta cirka 15 sekunder** och klicka sedan på knappen igen.
+2. Undvik att klicka upprepade gånger i snabb följd – varje körning startar flera AI-anrop samtidigt.
+3. Om din uppladdade meritförteckning eller jobbannons är mycket lång, korta ner den något för att minska belastningen.`;
       }
     }
     
