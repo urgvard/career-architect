@@ -1,5 +1,5 @@
 import type { Context, Config } from "@netlify/functions";
-import { GoogleGenAI } from "@google/genai";
+import { buildRoutes, generateContentResilient } from "../lib/gemini";
 
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
@@ -7,13 +7,16 @@ export default async (req: Request, context: Context) => {
   }
   try {
     const { systemPrompt, message, history } = await req.json();
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
 
-    const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+    // Resilient routes: the user's direct key first, then the managed Netlify
+    // AI Gateway as an automatic fallback when Google's direct endpoint is
+    // overloaded.
+    const routes = buildRoutes();
+    if (!routes.length) {
+      return Response.json({
+        error: "No Gemini route is configured. Set USER_GEMINI_API_KEY or enable the Netlify AI Gateway."
+      }, { status: 500 });
+    }
 
     const contents: any[] = [];
     if (history && Array.isArray(history)) {
@@ -29,8 +32,7 @@ export default async (req: Request, context: Context) => {
       parts: [{ text: message }]
     });
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+    const response = await generateContentResilient(routes, {
       contents: contents,
       config: {
         systemInstruction: systemPrompt,
@@ -43,8 +45,19 @@ export default async (req: Request, context: Context) => {
     
     const errStr = error?.message || String(error);
     let friendlyError = errStr;
-    
+
     if (
+      errStr.includes("503") ||
+      errStr.includes("UNAVAILABLE") ||
+      errStr.includes("overloaded") ||
+      errStr.includes("high demand")
+    ) {
+      friendlyError = `⚠️ **The AI model is temporarily overloaded (Error 503 - UNAVAILABLE)**
+
+Google Gemini is currently experiencing high demand. These spikes are usually short-lived. The request was automatically retried several times before this message.
+
+**How to resolve this:** Wait 20-30 seconds and send your message again — capacity normally recovers within a minute.`;
+    } else if (
       errStr.includes("429") ||
       errStr.includes("RESOURCE_EXHAUSTED") ||
       errStr.includes("quota") ||

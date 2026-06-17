@@ -1,5 +1,6 @@
 import type { Context, Config } from "@netlify/functions";
-import { GoogleGenAI, Type } from "@google/genai";
+import { Type } from "@google/genai";
+import { buildRoutes, generateContentResilient } from "../lib/gemini";
 
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
@@ -35,18 +36,15 @@ export default async (req: Request, context: Context) => {
       }, { status: 400 });
     }
 
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    // Resilient routes: the user's direct key first, then the managed Netlify
+    // AI Gateway as an automatic fallback when Google's direct endpoint is
+    // overloaded (the recurring 503 "high demand" spike).
+    const routes = buildRoutes();
+    if (!routes.length) {
       return Response.json({
-        error: "USER_GEMINI_API_KEY is not defined in Netlify environment variables."
+        error: "No Gemini route is configured. Set USER_GEMINI_API_KEY or enable the Netlify AI Gateway."
       }, { status: 500 });
     }
-
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
-
-    const ai = new GoogleGenAI({ apiKey: apiKey });
 
     let systemMetaConfigPrompt = "";
     let responseSchema: any = null;
@@ -299,8 +297,7 @@ ${resolvedJobText.trim()}
 
 Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside appropriate text fields.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+    const response = await generateContentResilient(routes, {
       contents: modelingPayload,
       config: {
         systemInstruction: systemMetaConfigPrompt,
@@ -315,8 +312,33 @@ Construct the response conforming strictly to the responseSchema object. Use cle
     
     const errStr = error?.message || String(error);
     let friendlyError = errStr;
-    
+
     if (
+      errStr.includes("503") ||
+      errStr.includes("UNAVAILABLE") ||
+      errStr.includes("overloaded") ||
+      errStr.includes("high demand")
+    ) {
+      if (lang === "en") {
+        friendlyError = `⚠️ **The AI model is temporarily overloaded (Error 503 - UNAVAILABLE)**
+
+Google Gemini is currently experiencing high demand. These spikes are usually short-lived.
+
+**How to resolve this:**
+1. **Wait 20-30 seconds**, then click the button again.
+2. The request was automatically retried several times before this message — the service is likely under heavy load right now.
+3. Try again shortly; capacity normally recovers within a minute.`;
+      } else {
+        friendlyError = `⚠️ **AI-modellen är tillfälligt överbelastad (Fel 503 - UNAVAILABLE)**
+
+Google Gemini har just nu hög efterfrågan. Dessa toppar är vanligtvis kortvariga.
+
+**Så här löser du det:**
+1. **Vänta 20-30 sekunder** och klicka sedan på knappen igen.
+2. Anropet försökte automatiskt flera gånger innan detta meddelande — tjänsten är troligen hårt belastad just nu.
+3. Försök igen om en stund; kapaciteten återhämtar sig oftast inom en minut.`;
+      }
+    } else if (
       errStr.includes("429") ||
       errStr.includes("RESOURCE_EXHAUSTED") ||
       errStr.includes("quota") ||
