@@ -1,27 +1,24 @@
 import type { Context, Config } from "@netlify/functions";
-import { GoogleGenAI } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 
-// Prefer Netlify AI Gateway (account-billed, high shared limits) so the mock
-// interview sandbox doesn't hit the personal free-tier 429 ceiling. A
-// user-supplied paid key still takes priority when explicitly set.
-function getGeminiClient(): GoogleGenAI {
-  const userKey = process.env.USER_GEMINI_API_KEY;
-  if (userKey) {
-    return new GoogleGenAI({ apiKey: userKey });
-  }
-  return new GoogleGenAI({});
-}
+// Mock-interview chat runs on Claude through Netlify AI Gateway (account-billed,
+// high shared limits) instead of the personal Gemini free-tier key that caused
+// the 429 errors. The default constructor auto-detects the gateway config.
+const MODEL = "claude-haiku-4-5";
+const anthropic = new Anthropic();
 
-async function generateWithRetry(ai: GoogleGenAI, params: any, attempts = 3): Promise<any> {
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   let lastErr: any;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await ai.models.generateContent(params);
+      return await fn();
     } catch (err: any) {
       lastErr = err;
+      const status = err?.status;
       const msg = err?.message || String(err);
-      const isRateLimited = msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED");
-      if (!isRateLimited || i === attempts - 1) throw err;
+      const isTransient =
+        status === 429 || status === 529 || msg.includes("429") || msg.includes("overloaded") || msg.includes("rate");
+      if (!isTransient || i === attempts - 1) throw err;
       await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
     }
   }
@@ -35,55 +32,54 @@ export default async (req: Request, context: Context) => {
   try {
     const { systemPrompt, message, history } = await req.json();
 
-    const ai = getGeminiClient();
-
-    const contents: any[] = [];
+    const messages: Anthropic.MessageParam[] = [];
     if (history && Array.isArray(history)) {
       for (const h of history) {
-        contents.push({
-          role: h.role === "assistant" ? "model" : "user",
-          parts: [{ text: h.message }]
+        messages.push({
+          role: h.role === "assistant" ? "assistant" : "user",
+          content: h.message,
         });
       }
     }
-    contents.push({
-      role: "user",
-      parts: [{ text: message }]
-    });
+    messages.push({ role: "user", content: message });
 
-    const response = await generateWithRetry(ai, {
-      model: "gemini-2.5-flash",
-      contents: contents,
-      config: {
-        systemInstruction: systemPrompt,
-      }
-    });
+    const response = await withRetry(() =>
+      anthropic.messages.create({
+        model: MODEL,
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages,
+      })
+    );
 
-    return Response.json({ reply: response.text || "" });
+    const reply = response.content
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("");
+
+    return Response.json({ reply });
   } catch (error: any) {
     console.error("Playground function error:", error);
-    
+
     const errStr = error?.message || String(error);
+    const status = error?.status;
     let friendlyError = errStr;
-    
+
     if (
+      status === 429 ||
+      status === 529 ||
       errStr.includes("429") ||
-      errStr.includes("RESOURCE_EXHAUSTED") ||
+      errStr.includes("overloaded") ||
       errStr.includes("quota") ||
       errStr.includes("Quota") ||
+      errStr.includes("rate") ||
       errStr.includes("limit")
     ) {
-      // Default to English as the Sandbox prompt may be multilingually active
-      friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+      friendlyError = `⚠️ **The AI service is busy right now**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
-
-**How to easily resolve this:**
-1. **Wait 15 seconds**, then type your message again.
-2. Avoid sending messages repeatedly in rapid succession.
-3. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+The request was temporarily rate-limited. Please wait a few seconds, then send your message again, and avoid sending messages in rapid succession.`;
     }
-    
+
     return Response.json({ error: friendlyError }, { status: 500 });
   }
 };

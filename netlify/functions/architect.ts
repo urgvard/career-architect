@@ -1,35 +1,69 @@
 import type { Context, Config } from "@netlify/functions";
-import { GoogleGenAI, Type } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 
-// Build a Gemini client. Prefer Netlify AI Gateway (account-billed, high
-// shared TPM limits) so we don't hit the personal free-tier ceiling of
-// 15 requests/min. A user-supplied paid key still takes priority when set.
-function getGeminiClient(): GoogleGenAI {
-  const userKey = process.env.USER_GEMINI_API_KEY;
-  if (userKey) {
-    return new GoogleGenAI({ apiKey: userKey });
-  }
-  // Zero-config: auto-detects the GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL
-  // variables Netlify injects for AI Gateway.
-  return new GoogleGenAI({});
-}
+// Model served through Netlify AI Gateway. Claude on the gateway is billed to
+// Netlify account credits with high, account-scoped rate limits, so we avoid the
+// personal Gemini free-tier ceiling (15 req/min) that produced the 429 errors.
+const MODEL = "claude-haiku-4-5";
 
-// Retry transient 429 / RESOURCE_EXHAUSTED responses with a short backoff so
-// brief per-minute spikes resolve themselves instead of surfacing as errors.
-async function generateWithRetry(ai: GoogleGenAI, params: any, attempts = 3): Promise<any> {
+// Zero-config client. Netlify injects ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL in
+// every compute context so the SDK routes through AI Gateway with no key wiring.
+const anthropic = new Anthropic();
+
+// Retry transient rate-limit / overload responses with a short backoff so brief
+// per-minute spikes resolve themselves instead of surfacing as errors.
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   let lastErr: any;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await ai.models.generateContent(params);
+      return await fn();
     } catch (err: any) {
       lastErr = err;
+      const status = err?.status;
       const msg = err?.message || String(err);
-      const isRateLimited = msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED");
-      if (!isRateLimited || i === attempts - 1) throw err;
+      const isTransient =
+        status === 429 ||
+        status === 529 ||
+        msg.includes("429") ||
+        msg.includes("overloaded") ||
+        msg.includes("rate");
+      if (!isTransient || i === attempts - 1) throw err;
       await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
     }
   }
   throw lastErr;
+}
+
+// Force a strict JSON object out of Claude by exposing a single tool whose input
+// schema is the desired shape and requiring the model to call it.
+async function generateStructured(opts: {
+  system: string;
+  user: string;
+  schema: any;
+  maxTokens: number;
+}): Promise<any> {
+  const message = await withRetry(() =>
+    anthropic.messages.create({
+      model: MODEL,
+      max_tokens: opts.maxTokens,
+      system: opts.system,
+      tools: [
+        {
+          name: "submit_result",
+          description: "Return the structured result for the candidate analysis.",
+          input_schema: opts.schema,
+        },
+      ],
+      tool_choice: { type: "tool", name: "submit_result" },
+      messages: [{ role: "user", content: opts.user }],
+    })
+  );
+
+  const toolUse = message.content.find((b: any) => b.type === "tool_use") as any;
+  if (!toolUse || !toolUse.input) {
+    throw new Error("Model did not return structured output.");
+  }
+  return toolUse.input;
 }
 
 export default async (req: Request, context: Context) => {
@@ -54,29 +88,21 @@ export default async (req: Request, context: Context) => {
     }
 
     if (!fullDocumentsContext.trim()) {
-      return Response.json({ 
-        error: lang === "en" ? "Please enter or upload at least one candidate document." : "Vänligen fyll i eller ladda upp minst ett kandidatdokument." 
+      return Response.json({
+        error: lang === "en" ? "Please enter or upload at least one candidate document." : "Vänligen fyll i eller ladda upp minst ett kandidatdokument."
       }, { status: 400 });
     }
 
     const resolvedJobText = jobDescription || "";
     if (!resolvedJobText.trim()) {
-      return Response.json({ 
-        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL." 
+      return Response.json({
+        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL."
       }, { status: 400 });
     }
 
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY || process.env.NETLIFY_AI_GATEWAY_KEY;
-    if (!apiKey) {
-      return Response.json({
-        error: "No Gemini access configured. Netlify AI Gateway requires a production deploy, or set USER_GEMINI_API_KEY."
-      }, { status: 500 });
-    }
-
-    const ai = getGeminiClient();
-
     let systemMetaConfigPrompt = "";
     let responseSchema: any = null;
+    let maxTokens = 2048;
 
     if (mode === "core") {
       systemMetaConfigPrompt = `You are a Principal Technical Recruiter and Executive Career Coach.
@@ -95,10 +121,10 @@ You MUST satisfy the following structural objectives in your response:
 5. "criticalGaps": Highlight critical missing items or requirements gaps (maximum 5 items).
 6. "coachingStrategy": Provide strategic guidance and tactical blueprints within the 220-word limit.
 
-Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
+Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
 
       responseSchema = {
-        type: Type.OBJECT,
+        type: "object",
         required: [
           "title",
           "companyName",
@@ -108,12 +134,12 @@ Your output must be returned strictly in JSON adhering to the specified schema c
           "coachingStrategy"
         ],
         properties: {
-          title: { type: Type.STRING },
-          companyName: { type: Type.STRING },
-          matchScore: { type: Type.INTEGER },
-          keyOverlaps: { type: Type.ARRAY, items: { type: Type.STRING } },
-          criticalGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
-          coachingStrategy: { type: Type.STRING }
+          title: { type: "string" },
+          companyName: { type: "string" },
+          matchScore: { type: "integer" },
+          keyOverlaps: { type: "array", items: { type: "string" } },
+          criticalGaps: { type: "array", items: { type: "string" } },
+          coachingStrategy: { type: "string" }
         }
       };
     } else if (mode === "materials") {
@@ -134,10 +160,10 @@ You MUST satisfy the following structural objectives in your response:
 3. "coverLetter": Compose a beautifully tailored standard Cover Letter within the 220-word limit.
 4. "optimizedBulletPoints": Provide exactly 3 high-value resume bullet adjustments.
 
-Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
+Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
 
       responseSchema = {
-        type: Type.OBJECT,
+        type: "object",
         required: [
           "personaTitle",
           "personaSystemPrompt",
@@ -145,25 +171,26 @@ Your output must be returned strictly in JSON adhering to the specified schema c
           "optimizedBulletPoints"
         ],
         properties: {
-          personaTitle: { type: Type.STRING },
-          personaSystemPrompt: { type: Type.STRING },
-          coverLetter: { type: Type.STRING },
+          personaTitle: { type: "string" },
+          personaSystemPrompt: { type: "string" },
+          coverLetter: { type: "string" },
           optimizedBulletPoints: {
-            type: Type.ARRAY,
+            type: "array",
             items: {
-              type: Type.OBJECT,
+              type: "object",
               required: ["impactArea", "originalSuggestion", "optimizedSuggestion", "keywordJustification"],
               properties: {
-                impactArea: { type: Type.STRING },
-                originalSuggestion: { type: Type.STRING },
-                optimizedSuggestion: { type: Type.STRING },
-                keywordJustification: { type: Type.STRING }
+                impactArea: { type: "string" },
+                originalSuggestion: { type: "string" },
+                optimizedSuggestion: { type: "string" },
+                keywordJustification: { type: "string" }
               }
             }
           }
         }
       };
     } else if (mode === "resume") {
+      maxTokens = 4096;
       systemMetaConfigPrompt = `You are an expert Resume Writer and ATS Optimization Specialist with 15+ years of executive recruiting experience.
 Your task is to construct a complete, professionally formatted, ATS-optimized resume/CV for the candidate, precisely tailored to the target job.
 
@@ -176,70 +203,70 @@ CRITICAL EXTRACTION RULES:
 - Extract and include ALL available experience, skills, education from the documents.`;
 
       responseSchema = {
-        type: Type.OBJECT,
+        type: "object",
         required: ["resumeData"],
         properties: {
           resumeData: {
-            type: Type.OBJECT,
+            type: "object",
             required: ["name", "targetRole", "contact", "summary", "experience", "skills", "education", "certifications", "languages", "achievements"],
             properties: {
-              name: { type: Type.STRING, description: "Candidate full name extracted from documents. Use 'Your Name' if not found." },
-              targetRole: { type: Type.STRING, description: "Target job title, tailored to match the job description." },
+              name: { type: "string", description: "Candidate full name extracted from documents. Use 'Your Name' if not found." },
+              targetRole: { type: "string", description: "Target job title, tailored to match the job description." },
               contact: {
-                type: Type.OBJECT,
+                type: "object",
                 properties: {
-                  email:    { type: Type.STRING },
-                  phone:    { type: Type.STRING },
-                  location: { type: Type.STRING },
-                  linkedin: { type: Type.STRING },
-                  website:  { type: Type.STRING }
+                  email:    { type: "string" },
+                  phone:    { type: "string" },
+                  location: { type: "string" },
+                  linkedin: { type: "string" },
+                  website:  { type: "string" }
                 }
               },
-              summary: { type: Type.STRING, description: "3-4 sentence ATS-optimized professional summary tailored to the job." },
+              summary: { type: "string", description: "3-4 sentence ATS-optimized professional summary tailored to the job." },
               experience: {
-                type: Type.ARRAY,
+                type: "array",
                 description: "All work experience extracted from candidate documents.",
                 items: {
-                  type: Type.OBJECT,
+                  type: "object",
                   required: ["company", "role", "period", "bullets"],
                   properties: {
-                    company:  { type: Type.STRING },
-                    role:     { type: Type.STRING },
-                    period:   { type: Type.STRING, description: "e.g. Jan 2022 \u2013 Mar 2024" },
-                    location: { type: Type.STRING },
+                    company:  { type: "string" },
+                    role:     { type: "string" },
+                    period:   { type: "string", description: "e.g. Jan 2022 – Mar 2024" },
+                    location: { type: "string" },
                     bullets: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
+                      type: "array",
+                      items: { type: "string" },
                       description: "3-5 achievement-focused ATS-optimized bullets per role with quantified results where possible."
                     }
                   }
                 }
               },
               skills: {
-                type: Type.OBJECT,
+                type: "object",
                 required: ["technical", "soft", "tools"],
                 properties: {
-                  technical: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Programming languages, frameworks, methodologies." },
-                  tools:     { type: Type.ARRAY, items: { type: Type.STRING }, description: "Software tools, platforms, cloud services." },
-                  soft:      { type: Type.ARRAY, items: { type: Type.STRING }, description: "Leadership, communication, management competencies." }
+                  technical: { type: "array", items: { type: "string" }, description: "Programming languages, frameworks, methodologies." },
+                  tools:     { type: "array", items: { type: "string" }, description: "Software tools, platforms, cloud services." },
+                  soft:      { type: "array", items: { type: "string" }, description: "Leadership, communication, management competencies." }
                 }
               },
               education: {
-                type: Type.ARRAY,
+                type: "array",
                 items: {
-                  type: Type.OBJECT,
+                  type: "object",
                   required: ["degree", "institution", "year"],
                   properties: {
-                    degree:      { type: Type.STRING },
-                    institution: { type: Type.STRING },
-                    year:        { type: Type.STRING },
-                    gpa:         { type: Type.STRING }
+                    degree:      { type: "string" },
+                    institution: { type: "string" },
+                    year:        { type: "string" },
+                    gpa:         { type: "string" }
                   }
                 }
               },
-              certifications: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Professional certifications and licenses." },
-              languages:      { type: Type.ARRAY, items: { type: Type.STRING }, description: "e.g. 'Swedish (Native)', 'English (Fluent)'." },
-              achievements:   { type: Type.ARRAY, items: { type: Type.STRING }, description: "Notable awards, recognition, or major accomplishments." }
+              certifications: { type: "array", items: { type: "string" }, description: "Professional certifications and licenses." },
+              languages:      { type: "array", items: { type: "string" }, description: "e.g. 'Swedish (Native)', 'English (Fluent)'." },
+              achievements:   { type: "array", items: { type: "string" }, description: "Notable awards, recognition, or major accomplishments." }
             }
           }
         }
@@ -247,10 +274,11 @@ CRITICAL EXTRACTION RULES:
 
     } else {
       // Default: full combined object (fallback/legacy)
+      maxTokens = 4096;
       systemMetaConfigPrompt = `You are a Principal Technical Recruiter, Executive Career Coach, and Expert Prompt Engineer.
 Your core competency is auditing candidate profile documents against specialized roles/job descriptions, creating a deep matching analysis, and synthesizing a production-grade custom System Prompt for simulated interview chat sandboxes.
 
-CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'title', 'companyName', 'personaTitle', 'keyOverlaps', 'criticalGaps', 'coverLetter', 'coachingStrategy', and all properties within 'optimizedBulletPoints') in the "${targetLang}" language. 
+CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'title', 'companyName', 'personaTitle', 'keyOverlaps', 'criticalGaps', 'coverLetter', 'coachingStrategy', and all properties within 'optimizedBulletPoints') in the "${targetLang}" language.
 The system prompt ('personaSystemPrompt') can contain instructions configured for the sandbox, but the mock interviewer in that prompt should also converse in "${targetLang}".
 
 CRITICAL SPEED & CONCISENESS LIMITS:
@@ -271,10 +299,10 @@ You MUST satisfy the following structural objectives in your response:
 9. "optimizedBulletPoints": Provide exactly 3 high-value resume bullet adjustments.
 10. "coachingStrategy": Provide strategic guidance and tactical blueprints within the 220-word limit.
 
-Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. Let the advice and synthesized system prompts be premium, authoritative, and immediately useful. All human-readable text must be in ${targetLang}.`;
+Maintain zero meta-introduction filler. Let the advice and synthesized system prompts be premium, authoritative, and immediately useful. All human-readable text must be in ${targetLang}.`;
 
       responseSchema = {
-        type: Type.OBJECT,
+        type: "object",
         required: [
           "title",
           "companyName",
@@ -288,28 +316,28 @@ Your output must be returned strictly in JSON adhering to the specified schema c
           "coachingStrategy"
         ],
         properties: {
-          title: { type: Type.STRING },
-          companyName: { type: Type.STRING },
-          matchScore: { type: Type.INTEGER },
-          personaTitle: { type: Type.STRING },
-          personaSystemPrompt: { type: Type.STRING },
-          keyOverlaps: { type: Type.ARRAY, items: { type: Type.STRING } },
-          criticalGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
-          coverLetter: { type: Type.STRING },
+          title: { type: "string" },
+          companyName: { type: "string" },
+          matchScore: { type: "integer" },
+          personaTitle: { type: "string" },
+          personaSystemPrompt: { type: "string" },
+          keyOverlaps: { type: "array", items: { type: "string" } },
+          criticalGaps: { type: "array", items: { type: "string" } },
+          coverLetter: { type: "string" },
           optimizedBulletPoints: {
-            type: Type.ARRAY,
+            type: "array",
             items: {
-              type: Type.OBJECT,
+              type: "object",
               required: ["impactArea", "originalSuggestion", "optimizedSuggestion", "keywordJustification"],
               properties: {
-                impactArea: { type: Type.STRING },
-                originalSuggestion: { type: Type.STRING },
-                optimizedSuggestion: { type: Type.STRING },
-                keywordJustification: { type: Type.STRING }
+                impactArea: { type: "string" },
+                originalSuggestion: { type: "string" },
+                optimizedSuggestion: { type: "string" },
+                keywordJustification: { type: "string" }
               }
             }
           },
-          coachingStrategy: { type: Type.STRING }
+          coachingStrategy: { type: "string" }
         }
       };
     }
@@ -324,59 +352,56 @@ ${fullDocumentsContext.trim()}
 ${resolvedJobText.trim()}
 </job_description>
 
-Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside appropriate text fields.`;
+Call the submit_result tool with the structured result. Use clear, engaging Markdown syntax inside appropriate text fields.`;
 
-    const response = await generateWithRetry(ai, {
-      model: "gemini-2.5-flash",
-      contents: modelingPayload,
-      config: {
-        systemInstruction: systemMetaConfigPrompt,
-        responseMimeType: "application/json",
-        responseSchema: responseSchema
-      }
+    const result = await generateStructured({
+      system: systemMetaConfigPrompt,
+      user: modelingPayload,
+      schema: responseSchema,
+      maxTokens,
     });
 
-    return Response.json(JSON.parse(response.text || "{}"));
+    return Response.json(result);
   } catch (error: any) {
     console.error("Architect function error:", error);
-    
+
     const errStr = error?.message || String(error);
+    const status = error?.status;
     let friendlyError = errStr;
-    
+
     if (
+      status === 429 ||
+      status === 529 ||
       errStr.includes("429") ||
-      errStr.includes("RESOURCE_EXHAUSTED") ||
+      errStr.includes("overloaded") ||
       errStr.includes("quota") ||
       errStr.includes("Quota") ||
+      errStr.includes("rate") ||
       errStr.includes("limit")
     ) {
       if (lang === "en") {
-        friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **The AI service is busy right now**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+The request was temporarily rate-limited. This usually clears within a few seconds.
 
-**How to easily resolve this:**
-1. **Wait 15 seconds**, then click the button again.
+**How to resolve this:**
+1. **Wait a few seconds**, then click the button again.
 2. Avoid clicking the button repeatedly in rapid succession.
-3. If your uploaded resume or pasted job description is exceptionally long, try shortening or summarizing the text slightly to reduce the token count.
-4. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+3. If your uploaded resume or pasted job description is exceptionally long, try shortening it slightly to reduce the request size.`;
       } else {
-        friendlyError = `⚠️ **Begränsning i Google Gemini-kvot (Fel 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **AI-tjänsten är upptagen just nu**
 
-Du har tillfälligt överskridit gränserna för gratisnivån (som tillåter max 15 anrop per minut och 250 000 ord/tokens per minut).
+Förfrågan begränsades tillfälligt. Detta brukar lösa sig inom några sekunder.
 
-**Så här löser du det enkelt:**
-1. **Vänta 15 sekunder** och klicka sedan på knappen igen.
+**Så här löser du det:**
+1. **Vänta några sekunder** och klicka sedan på knappen igen.
 2. Undvik att klicka på knappen upprepade gånger i snabb följd.
-3. Om dina dokument eller din jobbannons är extremt långa, försök att korta ner dem något så att de inte överskrider gränsen.
-4. Om du använder en betald API-nyckel, säkerställ att den är korrekt konfigurerad under dina Netlify-miljövariabler eller .env-fil.`;
+3. Om dina dokument eller din jobbannons är extremt långa, försök att korta ner dem något.`;
       }
     }
-    
-    return Response.json({ 
-      error: friendlyError,
-      stack: error?.stack,
-      details: JSON.stringify(error)
+
+    return Response.json({
+      error: friendlyError
     }, { status: 500 });
   }
 };
