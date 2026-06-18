@@ -7,19 +7,33 @@ import Anthropic from "@anthropic-ai/sdk";
 const MODEL = "claude-haiku-4-5";
 const anthropic = new Anthropic();
 
-async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+function isTransientError(err: any): boolean {
+  const status = err?.status;
+  const msg = (err?.message || String(err)).toLowerCase();
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 529 ||
+    msg.includes("429") ||
+    msg.includes("overloaded") ||
+    msg.includes("rate") ||
+    msg.includes("timeout") ||
+    msg.includes("econnreset")
+  );
+}
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
   let lastErr: any;
   for (let i = 0; i < attempts; i++) {
     try {
       return await fn();
     } catch (err: any) {
       lastErr = err;
-      const status = err?.status;
-      const msg = err?.message || String(err);
-      const isTransient =
-        status === 429 || status === 529 || msg.includes("429") || msg.includes("overloaded") || msg.includes("rate");
-      if (!isTransient || i === attempts - 1) throw err;
-      await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+      if (!isTransientError(err) || i === attempts - 1) throw err;
+      const backoff = Math.min(800 * 2 ** i, 6000) + Math.floor(Math.random() * 400);
+      await new Promise((r) => setTimeout(r, backoff));
     }
   }
   throw lastErr;

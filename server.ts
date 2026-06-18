@@ -15,6 +15,40 @@ const PORT = 3000;
 const MODEL = "claude-haiku-4-5";
 const anthropic = new Anthropic();
 
+// Retry transient rate-limit / overload responses with exponential backoff +
+// jitter, mirroring the deployed Netlify Functions so local dev behaves like prod.
+function isTransientError(err: any): boolean {
+  const status = err?.status;
+  const msg = (err?.message || String(err)).toLowerCase();
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 529 ||
+    msg.includes("429") ||
+    msg.includes("overloaded") ||
+    msg.includes("rate") ||
+    msg.includes("timeout") ||
+    msg.includes("econnreset")
+  );
+}
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+  let lastErr: any;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      if (!isTransientError(err) || i === attempts - 1) throw err;
+      const backoff = Math.min(800 * 2 ** i, 6000) + Math.floor(Math.random() * 400);
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+  throw lastErr;
+}
+
 // Force a strict JSON object out of Claude via a single required tool call.
 async function generateStructured(opts: {
   system: string;
@@ -22,20 +56,22 @@ async function generateStructured(opts: {
   schema: any;
   maxTokens: number;
 }): Promise<any> {
-  const message = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: opts.maxTokens,
-    system: opts.system,
-    tools: [
-      {
-        name: "submit_result",
-        description: "Return the structured result for the candidate analysis.",
-        input_schema: opts.schema,
-      },
-    ],
-    tool_choice: { type: "tool", name: "submit_result" },
-    messages: [{ role: "user", content: opts.user }],
-  });
+  const message = await withRetry(() =>
+    anthropic.messages.create({
+      model: MODEL,
+      max_tokens: opts.maxTokens,
+      system: opts.system,
+      tools: [
+        {
+          name: "submit_result",
+          description: "Return the structured result for the candidate analysis.",
+          input_schema: opts.schema,
+        },
+      ],
+      tool_choice: { type: "tool", name: "submit_result" },
+      messages: [{ role: "user", content: opts.user }],
+    })
+  );
   const toolUse = message.content.find((b: any) => b.type === "tool_use") as any;
   if (!toolUse || !toolUse.input) {
     throw new Error("Model did not return structured output.");
@@ -380,12 +416,14 @@ app.post("/api/playground/chat", async (req, res) => {
 
     messages.push({ role: "user", content: message });
 
-    const response = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages,
-    });
+    const response = await withRetry(() =>
+      anthropic.messages.create({
+        model: MODEL,
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages,
+      })
+    );
 
     const reply = response.content
       .filter((b: any) => b.type === "text")

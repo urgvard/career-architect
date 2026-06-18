@@ -10,25 +10,36 @@ const MODEL = "claude-haiku-4-5";
 // every compute context so the SDK routes through AI Gateway with no key wiring.
 const anthropic = new Anthropic();
 
-// Retry transient rate-limit / overload responses with a short backoff so brief
-// per-minute spikes resolve themselves instead of surfacing as errors.
-async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+// Retry transient rate-limit / overload responses with exponential backoff +
+// jitter so brief per-minute spikes on the shared AI Gateway resolve themselves
+// instead of surfacing as errors.
+function isTransientError(err: any): boolean {
+  const status = err?.status;
+  const msg = (err?.message || String(err)).toLowerCase();
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 529 ||
+    msg.includes("429") ||
+    msg.includes("overloaded") ||
+    msg.includes("rate") ||
+    msg.includes("timeout") ||
+    msg.includes("econnreset")
+  );
+}
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
   let lastErr: any;
   for (let i = 0; i < attempts; i++) {
     try {
       return await fn();
     } catch (err: any) {
       lastErr = err;
-      const status = err?.status;
-      const msg = err?.message || String(err);
-      const isTransient =
-        status === 429 ||
-        status === 529 ||
-        msg.includes("429") ||
-        msg.includes("overloaded") ||
-        msg.includes("rate");
-      if (!isTransient || i === attempts - 1) throw err;
-      await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+      if (!isTransientError(err) || i === attempts - 1) throw err;
+      const backoff = Math.min(800 * 2 ** i, 6000) + Math.floor(Math.random() * 400);
+      await new Promise((r) => setTimeout(r, backoff));
     }
   }
   throw lastErr;
