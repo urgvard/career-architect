@@ -1,6 +1,37 @@
 import type { Context, Config } from "@netlify/functions";
 import { GoogleGenAI, Type } from "@google/genai";
 
+// Build a Gemini client. Prefer Netlify AI Gateway (account-billed, high
+// shared TPM limits) so we don't hit the personal free-tier ceiling of
+// 15 requests/min. A user-supplied paid key still takes priority when set.
+function getGeminiClient(): GoogleGenAI {
+  const userKey = process.env.USER_GEMINI_API_KEY;
+  if (userKey) {
+    return new GoogleGenAI({ apiKey: userKey });
+  }
+  // Zero-config: auto-detects the GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL
+  // variables Netlify injects for AI Gateway.
+  return new GoogleGenAI({});
+}
+
+// Retry transient 429 / RESOURCE_EXHAUSTED responses with a short backoff so
+// brief per-minute spikes resolve themselves instead of surfacing as errors.
+async function generateWithRetry(ai: GoogleGenAI, params: any, attempts = 3): Promise<any> {
+  let lastErr: any;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await ai.models.generateContent(params);
+    } catch (err: any) {
+      lastErr = err;
+      const msg = err?.message || String(err);
+      const isRateLimited = msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED");
+      if (!isRateLimited || i === attempts - 1) throw err;
+      await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
@@ -35,18 +66,14 @@ export default async (req: Request, context: Context) => {
       }, { status: 400 });
     }
 
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY || process.env.NETLIFY_AI_GATEWAY_KEY;
     if (!apiKey) {
       return Response.json({
-        error: "USER_GEMINI_API_KEY is not defined in Netlify environment variables."
+        error: "No Gemini access configured. Netlify AI Gateway requires a production deploy, or set USER_GEMINI_API_KEY."
       }, { status: 500 });
     }
 
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
-
-    const ai = new GoogleGenAI({ apiKey: apiKey });
+    const ai = getGeminiClient();
 
     let systemMetaConfigPrompt = "";
     let responseSchema: any = null;
@@ -299,7 +326,7 @@ ${resolvedJobText.trim()}
 
 Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside appropriate text fields.`;
 
-    const response = await ai.models.generateContent({
+    const response = await generateWithRetry(ai, {
       model: "gemini-2.5-flash",
       contents: modelingPayload,
       config: {

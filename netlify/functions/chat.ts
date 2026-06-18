@@ -1,19 +1,41 @@
 import type { Context, Config } from "@netlify/functions";
 import { GoogleGenAI } from "@google/genai";
 
+// Prefer Netlify AI Gateway (account-billed, high shared limits) so the mock
+// interview sandbox doesn't hit the personal free-tier 429 ceiling. A
+// user-supplied paid key still takes priority when explicitly set.
+function getGeminiClient(): GoogleGenAI {
+  const userKey = process.env.USER_GEMINI_API_KEY;
+  if (userKey) {
+    return new GoogleGenAI({ apiKey: userKey });
+  }
+  return new GoogleGenAI({});
+}
+
+async function generateWithRetry(ai: GoogleGenAI, params: any, attempts = 3): Promise<any> {
+  let lastErr: any;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await ai.models.generateContent(params);
+    } catch (err: any) {
+      lastErr = err;
+      const msg = err?.message || String(err);
+      const isRateLimited = msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED");
+      if (!isRateLimited || i === attempts - 1) throw err;
+      await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
   }
   try {
     const { systemPrompt, message, history } = await req.json();
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
 
-    const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+    const ai = getGeminiClient();
 
     const contents: any[] = [];
     if (history && Array.isArray(history)) {
@@ -29,7 +51,7 @@ export default async (req: Request, context: Context) => {
       parts: [{ text: message }]
     });
 
-    const response = await ai.models.generateContent({
+    const response = await generateWithRetry(ai, {
       model: "gemini-2.5-flash",
       contents: contents,
       config: {
