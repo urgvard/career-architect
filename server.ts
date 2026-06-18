@@ -1,6 +1,6 @@
 import express from "express";
 import path from "path";
-import { GoogleGenAI, Type } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 
@@ -9,21 +9,75 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
-// Initialize Gemini SDK with custom user agent and key from env
-const getGeminiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.warn("GEMINI_API_KEY environment variable is not defined");
+// Claude through Netlify AI Gateway (account-billed, high shared limits). The
+// zero-config constructor auto-detects the ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
+// that Netlify injects, so local dev under `netlify dev` matches production.
+const MODEL = "claude-haiku-4-5";
+const anthropic = new Anthropic();
+
+// Retry transient rate-limit / overload responses with exponential backoff +
+// jitter, mirroring the deployed Netlify Functions so local dev behaves like prod.
+function isTransientError(err: any): boolean {
+  const status = err?.status;
+  const msg = (err?.message || String(err)).toLowerCase();
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 529 ||
+    msg.includes("429") ||
+    msg.includes("overloaded") ||
+    msg.includes("rate") ||
+    msg.includes("timeout") ||
+    msg.includes("econnreset")
+  );
+}
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+  let lastErr: any;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      if (!isTransientError(err) || i === attempts - 1) throw err;
+      const backoff = Math.min(800 * 2 ** i, 6000) + Math.floor(Math.random() * 400);
+      await new Promise((r) => setTimeout(r, backoff));
+    }
   }
-  return new GoogleGenAI({
-    apiKey: apiKey || "",
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
-      },
-    },
-  });
-};
+  throw lastErr;
+}
+
+// Force a strict JSON object out of Claude via a single required tool call.
+async function generateStructured(opts: {
+  system: string;
+  user: string;
+  schema: any;
+  maxTokens: number;
+}): Promise<any> {
+  const message = await withRetry(() =>
+    anthropic.messages.create({
+      model: MODEL,
+      max_tokens: opts.maxTokens,
+      system: opts.system,
+      tools: [
+        {
+          name: "submit_result",
+          description: "Return the structured result for the candidate analysis.",
+          input_schema: opts.schema,
+        },
+      ],
+      tool_choice: { type: "tool", name: "submit_result" },
+      messages: [{ role: "user", content: opts.user }],
+    })
+  );
+  const toolUse = message.content.find((b: any) => b.type === "tool_use") as any;
+  if (!toolUse || !toolUse.input) {
+    throw new Error("Model did not return structured output.");
+  }
+  return toolUse.input;
+}
 
 app.use(express.json({ limit: "15mb" })); // Increase limit for document uploads
 
@@ -62,7 +116,7 @@ async function fetchCleanUrl(urlStr: string): Promise<string> {
 
 // API: Check status of API Key
 app.get("/api/apiKeyStatus", (req, res) => {
-  const hasKey = !!process.env.GEMINI_API_KEY;
+  const hasKey = !!(process.env.ANTHROPIC_API_KEY || process.env.NETLIFY_AI_GATEWAY_KEY || process.env.GEMINI_API_KEY);
   res.json({ hasKey });
 });
 
@@ -116,8 +170,6 @@ app.post("/api/architect", async (req, res) => {
       });
     }
 
-    const ai = getGeminiClient();
-
     let systemMetaConfigPrompt = "";
     let responseSchema: any = null;
 
@@ -141,7 +193,7 @@ You MUST satisfy the following structural objectives in your response:
 Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
 
       responseSchema = {
-        type: Type.OBJECT,
+        type: "object",
         required: [
           "title",
           "companyName",
@@ -151,12 +203,12 @@ Your output must be returned strictly in JSON adhering to the specified schema c
           "coachingStrategy"
         ],
         properties: {
-          title: { type: Type.STRING },
-          companyName: { type: Type.STRING },
-          matchScore: { type: Type.INTEGER },
-          keyOverlaps: { type: Type.ARRAY, items: { type: Type.STRING } },
-          criticalGaps: { type: Type.ARRAY, items: { type: Type.STRING } },
-          coachingStrategy: { type: Type.STRING }
+          title: { type: "string" },
+          companyName: { type: "string" },
+          matchScore: { type: "integer" },
+          keyOverlaps: { type: "array", items: { type: "string" } },
+          criticalGaps: { type: "array", items: { type: "string" } },
+          coachingStrategy: { type: "string" }
         }
       };
     } else if (mode === "materials") {
@@ -180,7 +232,7 @@ You MUST satisfy the following structural objectives in your response:
 Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
 
       responseSchema = {
-        type: Type.OBJECT,
+        type: "object",
         required: [
           "personaTitle",
           "personaSystemPrompt",
@@ -188,19 +240,19 @@ Your output must be returned strictly in JSON adhering to the specified schema c
           "optimizedBulletPoints"
         ],
         properties: {
-          personaTitle: { type: Type.STRING },
-          personaSystemPrompt: { type: Type.STRING },
-          coverLetter: { type: Type.STRING },
+          personaTitle: { type: "string" },
+          personaSystemPrompt: { type: "string" },
+          coverLetter: { type: "string" },
           optimizedBulletPoints: {
-            type: Type.ARRAY,
+            type: "array",
             items: {
-              type: Type.OBJECT,
+              type: "object",
               required: ["impactArea", "originalSuggestion", "optimizedSuggestion", "keywordJustification"],
               properties: {
-                impactArea: { type: Type.STRING },
-                originalSuggestion: { type: Type.STRING },
-                optimizedSuggestion: { type: Type.STRING },
-                keywordJustification: { type: Type.STRING }
+                impactArea: { type: "string" },
+                originalSuggestion: { type: "string" },
+                optimizedSuggestion: { type: "string" },
+                keywordJustification: { type: "string" }
               }
             }
           }
@@ -235,7 +287,7 @@ You MUST satisfy the following structural objectives in your response:
 Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. Let the advice and synthesized system prompts be premium, authoritative, and immediately useful. All human-readable text must be in ${targetLang}.`;
 
       responseSchema = {
-        type: Type.OBJECT,
+        type: "object",
         required: [
           "title",
           "companyName",
@@ -249,36 +301,36 @@ Your output must be returned strictly in JSON adhering to the specified schema c
           "coachingStrategy"
         ],
         properties: {
-          title: { type: Type.STRING },
-          companyName: { type: Type.STRING },
-          matchScore: { type: Type.INTEGER },
-          personaTitle: { type: Type.STRING },
-          personaSystemPrompt: { type: Type.STRING, description: "Highly advanced, complete system prompt representing this interview persona for sandbox utilization." },
+          title: { type: "string" },
+          companyName: { type: "string" },
+          matchScore: { type: "integer" },
+          personaTitle: { type: "string" },
+          personaSystemPrompt: { type: "string", description: "Highly advanced, complete system prompt representing this interview persona for sandbox utilization." },
           keyOverlaps: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
+            type: "array",
+            items: { type: "string" },
             description: "Matched keyword strengths found between profile and target job description."
           },
           criticalGaps: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
+            type: "array",
+            items: { type: "string" },
             description: "Crucial requirements or skills missing from candidate background."
           },
-          coverLetter: { type: Type.STRING, description: "Customized ready-to-copy Cover Letter in Markdown format." },
+          coverLetter: { type: "string", description: "Customized ready-to-copy Cover Letter in Markdown format." },
           optimizedBulletPoints: {
-            type: Type.ARRAY,
+            type: "array",
             items: {
-              type: Type.OBJECT,
+              type: "object",
               required: ["impactArea", "originalSuggestion", "optimizedSuggestion", "keywordJustification"],
               properties: {
-                impactArea: { type: Type.STRING, description: "E.g., System scalability, database speed, client acquisition" },
-                originalSuggestion: { type: Type.STRING, description: "A classic generic resume bullet statement." },
-                optimizedSuggestion: { type: Type.STRING, description: "Optimized statement incorporating key search phrases and KPI metric metrics." },
-                keywordJustification: { type: Type.STRING, description: "Why this change fits the job description query priorities." }
+                impactArea: { type: "string", description: "E.g., System scalability, database speed, client acquisition" },
+                originalSuggestion: { type: "string", description: "A classic generic resume bullet statement." },
+                optimizedSuggestion: { type: "string", description: "Optimized statement incorporating key search phrases and KPI metric metrics." },
+                keywordJustification: { type: "string", description: "Why this change fits the job description query priorities." }
               }
             }
           },
-          coachingStrategy: { type: Type.STRING, description: "Bespoke walkthrough guiding the candidate through core behavioral & technical expectations in Markdown format." }
+          coachingStrategy: { type: "string", description: "Bespoke walkthrough guiding the candidate through core behavioral & technical expectations in Markdown format." }
         }
       };
     }
@@ -293,56 +345,53 @@ ${fullDocumentsContext.trim()}
 ${resolvedJobText.trim()}
 </job_description>
 
-Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside appropriate fields.`;
+Call the submit_result tool with the structured result. Use clear, engaging Markdown syntax inside appropriate fields.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: modelingPayload,
-      config: {
-        systemInstruction: systemMetaConfigPrompt,
-        responseMimeType: "application/json",
-        responseSchema: responseSchema
-      }
+    const parsedResponse = await generateStructured({
+      system: systemMetaConfigPrompt,
+      user: modelingPayload,
+      schema: responseSchema,
+      maxTokens: mode === "core" || mode === "materials" ? 2048 : 4096,
     });
-
-    const parsedResponse = JSON.parse(response.text || "{}");
     res.json(parsedResponse);
   } catch (error: any) {
     console.error("Architect aligner endpoint error:", error);
     
     const errStr = error?.message || String(error);
+    const status = error?.status;
     let friendlyError = errStr;
-    
+
     if (
+      status === 429 ||
+      status === 529 ||
       errStr.includes("429") ||
-      errStr.includes("RESOURCE_EXHAUSTED") ||
+      errStr.includes("overloaded") ||
       errStr.includes("quota") ||
       errStr.includes("Quota") ||
+      errStr.includes("rate") ||
       errStr.includes("limit")
     ) {
       if (lang === "en") {
-        friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **The AI service is busy right now**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+The request was temporarily rate-limited. This usually clears within a few seconds.
 
-**How to easily resolve this:**
-1. **Wait 15 seconds**, then click the button again.
+**How to resolve this:**
+1. **Wait a few seconds**, then click the button again.
 2. Avoid clicking the button repeatedly in rapid succession.
-3. If your uploaded resume or pasted job description is exceptionally long, try shortening or summarizing the text slightly to reduce the token count.
-4. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+3. If your uploaded resume or pasted job description is exceptionally long, try shortening it slightly.`;
       } else {
-        friendlyError = `⚠️ **Begränsning i Google Gemini-kvot (Fel 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **AI-tjänsten är upptagen just nu**
 
-Du har tillfälligt överskridit gränserna för gratisnivån (som tillåter max 15 anrop per minut och 250 000 ord/tokens per minut).
+Förfrågan begränsades tillfälligt. Detta brukar lösa sig inom några sekunder.
 
-**Så här löser du det enkelt:**
-1. **Vänta 15 sekunder** och klicka sedan på knappen igen.
+**Så här löser du det:**
+1. **Vänta några sekunder** och klicka sedan på knappen igen.
 2. Undvik att klicka på knappen upprepade gånger i snabb följd.
-3. Om dina dokument eller din jobbannons är extremt långa, försök att korta ner dem något så att de inte överskrider gränsen.
-4. Om du använder en betald API-nyckel, säkerställ att den är korrekt konfigurerad under dina Netlify-miljövariabler eller .env-fil.`;
+3. Om dina dokument eller din jobbannons är extremt långa, försök att korta ner dem något.`;
       }
     }
-    
+
     res.status(500).json({ error: friendlyError });
   }
 });
@@ -355,58 +404,55 @@ app.post("/api/playground/chat", async (req, res) => {
       return res.status(400).json({ error: "systemPrompt and message arguments are required" });
     }
 
-    const ai = getGeminiClient();
-
-    // Map chat timeline variables safely
-    const contents: any[] = [];
+    const messages: Anthropic.MessageParam[] = [];
     if (history && Array.isArray(history)) {
       for (const h of history) {
-        contents.push({
-          role: h.role === "assistant" ? "model" : "user",
-          parts: [{ text: h.message }]
+        messages.push({
+          role: h.role === "assistant" ? "assistant" : "user",
+          content: h.message,
         });
       }
     }
 
-    contents.push({
-      role: "user",
-      parts: [{ text: message }]
-    });
+    messages.push({ role: "user", content: message });
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: contents,
-      config: {
-        systemInstruction: systemPrompt,
-      }
-    });
+    const response = await withRetry(() =>
+      anthropic.messages.create({
+        model: MODEL,
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages,
+      })
+    );
 
-    res.json({
-      reply: response.text || ""
-    });
+    const reply = response.content
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("");
+
+    res.json({ reply });
   } catch (error: any) {
     console.error("Playground sandbox controller error:", error);
-    
+
     const errStr = error?.message || String(error);
+    const status = error?.status;
     let friendlyError = errStr;
-    
+
     if (
+      status === 429 ||
+      status === 529 ||
       errStr.includes("429") ||
-      errStr.includes("RESOURCE_EXHAUSTED") ||
+      errStr.includes("overloaded") ||
       errStr.includes("quota") ||
       errStr.includes("Quota") ||
+      errStr.includes("rate") ||
       errStr.includes("limit")
     ) {
-      friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+      friendlyError = `⚠️ **The AI service is busy right now**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
-
-**How to easily resolve this:**
-1. **Wait 15 seconds**, then type your message again.
-2. Avoid sending messages repeatedly in rapid succession.
-3. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify environment variables or local .env file.`;
+The request was temporarily rate-limited. Please wait a few seconds, then send your message again, and avoid sending messages in rapid succession.`;
     }
-    
+
     res.status(500).json({ error: friendlyError });
   }
 });
