@@ -7,13 +7,16 @@ export default async (req: Request, context: Context) => {
   }
   try {
     const { systemPrompt, message, history } = await req.json();
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
 
-    const ai = new GoogleGenAI({ apiKey: apiKey || "" });
+    // Route through the Netlify AI Gateway (billed to Netlify credits, high account-level
+    // limits) instead of a personal free-tier Gemini key whose per-minute caps cause 429s.
+    // The SDK auto-detects the gateway-injected GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL;
+    // fall back to a direct key only when the gateway is unavailable.
+    const ai = process.env.GOOGLE_GEMINI_BASE_URL
+      ? new GoogleGenAI({})
+      : new GoogleGenAI({ apiKey: process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "" });
+
+    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
     const contents: any[] = [];
     if (history && Array.isArray(history)) {
@@ -30,7 +33,7 @@ export default async (req: Request, context: Context) => {
     });
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: model,
       contents: contents,
       config: {
         systemInstruction: systemPrompt,
@@ -52,14 +55,13 @@ export default async (req: Request, context: Context) => {
       errStr.includes("limit")
     ) {
       // Default to English as the Sandbox prompt may be multilingually active
-      friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+      friendlyError = `⚠️ **The AI service is busy right now (temporary rate limit)**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+The AI service hit a momentary capacity limit. This is temporary and resets within a minute.
 
-**How to easily resolve this:**
-1. **Wait 15 seconds**, then type your message again.
-2. Avoid sending messages repeatedly in rapid succession.
-3. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+**How to resolve this:**
+1. **Wait about 15 seconds**, then send your message again.
+2. Avoid sending messages repeatedly in rapid succession.`;
     }
     
     return Response.json({ error: friendlyError }, { status: 500 });

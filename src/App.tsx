@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { UploadFile, AlignmentResult, BulletOptimization } from "./types";
+import { extractFileText } from "./lib/extractText";
 import SandboxPlayground from "./components/SandboxPlayground";
 import CVBuilder from "./components/CVBuilder";
 import {
@@ -109,6 +110,8 @@ const TRANSLATIONS = {
     themeLabel: "Tema",
     themeLight: "Ljust",
     themeDark: "Mörkt",
+    newCV: "NYTT CV",
+    newCVTip: "Börja om och skapa ett nytt CV från början",
   },
   en: {
     appTitle: "Career Architect",
@@ -187,6 +190,8 @@ const TRANSLATIONS = {
     themeLabel: "Theme",
     themeLight: "Light",
     themeDark: "Dark",
+    newCV: "NEW CV",
+    newCVTip: "Start over and generate a brand new CV from scratch",
   }
 };
 
@@ -220,6 +225,10 @@ export default function App() {
   const [documentsPasted, setDocumentsPasted] = useState("");
   const [uploadedFiles, setUploadedFiles] = useState<UploadFile[]>([]);
   const [isDragActive, setIsDragActive] = useState(false);
+  // Files are now parsed (PDF/DOCX text extraction) before use; surface progress
+  // and any per-file extraction warnings to the user.
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [fileNotice, setFileNotice] = useState<string | null>(null);
 
   // Job Opportunity State
   const [jobDescription, setJobDescription] = useState("");
@@ -230,6 +239,11 @@ export default function App() {
   const [alignStep, setAlignStep] = useState("");
   const [alignError, setAlignError] = useState<string | null>(null);
   const [result, setResult] = useState<AlignmentResult | null>(null);
+
+  // Manual CV (re)generation fallback state — used when the automatic resume
+  // generation did not complete during the main pipeline.
+  const [isGeneratingCV, setIsGeneratingCV] = useState(false);
+  const [cvError, setCvError] = useState<string | null>(null);
 
   // Internal Active TAB Interface View
   const [activeTab, setActiveTab] = useState<"match" | "cover-letter" | "resume-bullets" | "system-prompt" | "playground" | "ats-cv">("match");
@@ -457,25 +471,36 @@ export default function App() {
     };
   }, [splashActive]);
 
-  // Quick helper to read dropped files client-side
-  const readAndAddFiles = (filesList: File[]) => {
-    filesList.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const text = event.target?.result as string;
+  // Read dropped/selected files and extract their real text. Binary formats
+  // (PDF, DOCX) are parsed into clean text rather than decoded as raw bytes —
+  // sending decoded binary previously blew past the model's token limit.
+  const readAndAddFiles = async (filesList: File[]) => {
+    if (filesList.length === 0) return;
+    setIsExtracting(true);
+    setFileNotice(null);
+    const warnings: string[] = [];
+    try {
+      for (const file of filesList) {
+        const { text, warning } = await extractFileText(file, lang);
+        if (warning) warnings.push(warning);
+        if (!text) continue;
         const sizeStr = (file.size / 1024).toFixed(1) + " KB";
         setUploadedFiles((prev) => [
           ...prev,
           { name: file.name, content: text, size: sizeStr },
         ]);
-      };
-      reader.readAsText(file);
-    });
+      }
+    } finally {
+      setIsExtracting(false);
+      setFileNotice(warnings.length ? warnings.join("\n") : null);
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      readAndAddFiles(Array.from(e.target.files));
+      void readAndAddFiles(Array.from(e.target.files));
+      // Allow re-selecting the same file after a removal.
+      e.target.value = "";
     }
   };
 
@@ -494,7 +519,7 @@ export default function App() {
     e.stopPropagation();
     setIsDragActive(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      readAndAddFiles(Array.from(e.dataTransfer.files));
+      void readAndAddFiles(Array.from(e.dataTransfer.files));
     }
   };
 
@@ -504,6 +529,7 @@ export default function App() {
 
   const handleClearAllFiles = () => {
     setUploadedFiles([]);
+    setFileNotice(null);
   };
 
   // Run Document-to-Job alignment cognitive pipeline
@@ -564,14 +590,20 @@ export default function App() {
 
       setAlignStep(t.step5); // "Syntetiserar professionella personliga brev..."
 
-      // Helper to check if a 500 error response is actually a Gemini quota error
+      // Helper to check if a 500 error response is a transient/retryable Gemini error.
+      // Covers both quota (429/RESOURCE_EXHAUSTED) and the very common transient
+      // "model overloaded / high demand" 503 (UNAVAILABLE) responses.
       const isQuotaError = async (resCopy: Response): Promise<boolean> => {
         try {
           const data = await resCopy.json();
           const errStr = data?.error || "";
           return (
             errStr.includes("429") ||
+            errStr.includes("503") ||
             errStr.includes("RESOURCE_EXHAUSTED") ||
+            errStr.includes("UNAVAILABLE") ||
+            errStr.includes("overloaded") ||
+            errStr.includes("high demand") ||
             errStr.includes("quota") ||
             errStr.includes("Quota") ||
             errStr.includes("limit")
@@ -581,8 +613,8 @@ export default function App() {
         }
       };
 
-      // Resilient fetch helper with exponential backoff on 429 / resource exhaust limit
-      const fetchWithRetry = async (mode: "core" | "materials", retriesLeft = 2): Promise<Response> => {
+      // Resilient fetch helper with backoff on transient 429/503 limits and 502/504 timeouts.
+      const fetchWithRetry = async (mode: "core" | "materials" | "resume", retriesLeft = 2): Promise<Response> => {
         try {
           const res = await fetch("/api/architect", {
             method: "POST",
@@ -595,15 +627,22 @@ export default function App() {
               mode,
             }),
           });
-          
-          if (res.status === 429 || (res.status === 500 && await isQuotaError(res.clone()))) {
+
+          if (
+            res.status === 429 ||
+            res.status === 502 ||
+            res.status === 503 ||
+            res.status === 504 ||
+            (res.status === 500 && await isQuotaError(res.clone()))
+          ) {
             if (retriesLeft > 0) {
-              const retryMsg = lang === "en" 
-                ? `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...` 
-                : `⚠️ Kvotgräns nådd för ${mode === "core" ? "matchningsrapport" : "ansökningshandlingar"}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`;
+              const modeLabelSv = mode === "core" ? "matchningsrapport" : mode === "resume" ? "CV" : "ansökningshandlingar";
+              const retryMsg = lang === "en"
+                ? `⚠️ Rate limit hit for ${mode} alignment. Retrying in 4 seconds (${retriesLeft} retries left)...`
+                : `⚠️ Kvotgräns nådd för ${modeLabelSv}. Försöker igen om 4 sekunder (${retriesLeft} försök kvar)...`;
               setAlignStep(retryMsg);
               await new Promise((resolve) => setTimeout(resolve, 4000));
-              setAlignStep(mode === "core" ? t.step3 : t.step5);
+              setAlignStep(mode === "core" ? t.step3 : mode === "resume" ? (t.step8 || t.step5) : t.step5);
               return await fetchWithRetry(mode, retriesLeft - 1);
             }
           }
@@ -623,26 +662,40 @@ export default function App() {
         fetchWithRetry("materials")
       ]);
 
-      if (!coreRes.ok) {
-        let errMsg = `Pipeline failed: Server status ${coreRes.status}`;
+      // Platform timeouts (502/504) arrive with no JSON body, so surface a friendly,
+      // localized explanation instead of a bare "Server status 504".
+      const timeoutMessage = lang === "en"
+        ? `⚠️ **The request took too long and timed out**
+
+Generating your documents exceeded the time limit. This usually happens when the pasted documents or job advert are very long.
+
+**How to resolve this:**
+1. **Click the button again** — a fresh attempt often completes within the limit.
+2. **Trim the input slightly** (remove duplicated text or very long sections) so the AI has less to process.`
+        : `⚠️ **Förfrågan tog för lång tid och avbröts**
+
+Att skapa dina dokument överskred tidsgränsen. Det händer oftast när dokumenten eller jobbannonsen är mycket långa.
+
+**Så här löser du det:**
+1. **Klicka på knappen igen** – ett nytt försök går oftast igenom inom gränsen.
+2. **Korta ner texten något** (ta bort dubblerad text eller mycket långa avsnitt) så att AI:n har mindre att bearbeta.`;
+
+      const buildPipelineError = async (res: Response): Promise<string> => {
+        if (res.status === 502 || res.status === 504) return timeoutMessage;
+        let errMsg = `Pipeline failed: Server status ${res.status}`;
         try {
-          const errData = await coreRes.json();
-          if (errData && errData.error) {
-            errMsg = errData.error;
-          }
+          const errData = await res.json();
+          if (errData && errData.error) errMsg = errData.error;
         } catch (_) {}
-        throw new Error(errMsg);
+        return errMsg;
+      };
+
+      if (!coreRes.ok) {
+        throw new Error(await buildPipelineError(coreRes));
       }
 
       if (!matRes.ok) {
-        let errMsg = `Pipeline failed: Server status ${matRes.status}`;
-        try {
-          const errData = await matRes.json();
-          if (errData && errData.error) {
-            errMsg = errData.error;
-          }
-        } catch (_) {}
-        throw new Error(errMsg);
+        throw new Error(await buildPipelineError(matRes));
       }
 
       const coreData = await coreRes.json();
@@ -652,7 +705,7 @@ export default function App() {
       let resumeData: any = null;
       try {
         setAlignStep(t.step8 || "Building ATS resume...");
-        const resumeRes = await fetchWithRetry("resume");
+        const resumeRes = await fetchWithRetry("resume", 3);
         if (resumeRes.ok) {
           try { resumeData = await resumeRes.json(); } catch (_) {}
         }
@@ -679,9 +732,77 @@ export default function App() {
     }
   };
 
+  // Manual CV generation — safety net for the ATS-CV tab when the automatic
+  // resume generation did not complete (e.g. a transient model overload that
+  // outlasted the in-pipeline retries). Re-runs only the "resume" mode and
+  // merges the result into the existing analysis.
+  const handleGenerateCV = async () => {
+    if (isGeneratingCV) return;
+    const jobText = jobDescription.trim();
+    if ((!documentsPasted.trim() && uploadedFiles.length === 0) || !jobText) {
+      setCvError(lang === "en"
+        ? "Run a full analysis first so the CV has documents and a job description to work from."
+        : "Kör en fullständig analys först så att CV:t har dokument och en jobbannons att utgå från.");
+      return;
+    }
+    setCvError(null);
+    setIsGeneratingCV(true);
+    try {
+      const res = await fetch("/api/architect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          documentsPasted,
+          uploadedFiles,
+          jobDescription: jobText,
+          lang,
+          mode: "resume",
+        }),
+      });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const data = await res.json();
+          if (data?.error) msg = data.error;
+        } catch (_) {}
+        throw new Error(msg);
+      }
+      const data = await res.json();
+      if (!data?.resumeData) {
+        throw new Error(lang === "en"
+          ? "The model returned no CV data. Please try again."
+          : "Modellen returnerade inget CV-innehåll. Försök igen.");
+      }
+      setResult((prev) => (prev ? { ...prev, resumeData: data.resumeData } : prev));
+    } catch (err: any) {
+      console.error("Manual CV generation failed:", err);
+      setCvError(err?.message || (lang === "en" ? "CV generation failed." : "CV-generering misslyckades."));
+    } finally {
+      setIsGeneratingCV(false);
+    }
+  };
+
+  // Reset the whole workspace so the user can generate a brand new CV from
+  // scratch. Clears candidate documents, the job opportunity, every generated
+  // result and any in-flight error/progress state, then returns to the first tab
+  // and scrolls back to the top.
+  const handleStartNewCV = () => {
+    setDocumentsPasted("");
+    setUploadedFiles([]);
+    setFileNotice(null);
+    setJobDescription("");
+    setJobUrl("");
+    setResult(null);
+    setAlignError(null);
+    setAlignStep("");
+    setCvError(null);
+    setActiveTab("match");
+    setCopiedStates({});
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   // Clipboard copies helper
-  const triggerCopy = (key: string, textToCopy: string) => {
-    navigator.clipboard.writeText(textToCopy);
+  const triggerCopy = (key: string, textToCopy: string) => {    navigator.clipboard.writeText(textToCopy);
     setCopiedStates((prev) => ({ ...prev, [key]: true }));
     setTimeout(() => {
       setCopiedStates((prev) => ({ ...prev, [key]: false }));
@@ -950,6 +1071,17 @@ export default function App() {
 
           {/* DUAL TOGGLE HEADERS (LANGUAGE & THEME) */}
           <div className="flex flex-wrap items-center gap-4 bg-neutral-900 border border-neutral-800 rounded-xl p-2 shrink-0 shadow-lg">
+            {/* New CV / Start over */}
+            <button
+              type="button"
+              onClick={handleStartNewCV}
+              title={t.newCVTip}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-black uppercase tracking-wide shadow-md transition-colors cursor-pointer shrink-0"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>{t.newCV}</span>
+            </button>
+
             {/* Language Toggle */}
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider pl-1.5 hidden sm:inline-flex items-center gap-1">
@@ -1085,11 +1217,26 @@ export default function App() {
                       id="file-upload-input"
                       type="file"
                       multiple
+                      accept=".pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.json,.rtf,.html,.htm,.yaml,.yml,.log,.text"
                       onChange={handleFileChange}
                       className="hidden"
                     />
                   </label>
                 </div>
+
+                {/* Extraction progress + per-file warnings */}
+                {isExtracting && (
+                  <div className="flex items-center gap-2 text-[11px] text-neutral-500 dark:text-neutral-400">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>{lang === "en" ? "Reading document text…" : "Läser dokumenttext…"}</span>
+                  </div>
+                )}
+                {fileNotice && (
+                  <div className="flex items-start gap-2 text-[11px] text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/40 rounded p-2">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span className="whitespace-pre-line leading-snug">{fileNotice}</span>
+                  </div>
+                )}
 
                 {/* File list indicators */}
                 {uploadedFiles.length > 0 && (
@@ -1642,7 +1789,29 @@ export default function App() {
               ) : (
                 <div className="flex flex-col items-center justify-center py-16 text-neutral-400">
                   <span className="text-4xl mb-3">📄</span>
-                  <p className="text-sm">{lang === "sv" ? "CV genereras automatiskt när du kör en analys." : "Resume will be generated automatically when you run an analysis."}</p>
+                  <p className="text-sm text-center max-w-md">{lang === "sv" ? "CV genereras automatiskt när du kör en analys." : "Resume will be generated automatically when you run an analysis."}</p>
+                  {result && (
+                    <>
+                      <p className="text-xs text-neutral-400 mt-2 text-center max-w-md">
+                        {lang === "sv"
+                          ? "Genererades det inte? Skapa det manuellt här nedan."
+                          : "Didn't it generate? Create it manually below."}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleGenerateCV}
+                        disabled={isGeneratingCV}
+                        className="mt-4 px-4 py-2 rounded-md bg-neutral-800 text-white text-sm font-semibold hover:bg-neutral-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        {isGeneratingCV
+                          ? (lang === "sv" ? "Genererar CV…" : "Generating CV…")
+                          : (lang === "sv" ? "Generera CV" : "Generate CV")}
+                      </button>
+                      {cvError && (
+                        <p className="text-xs text-red-500 mt-3 text-center max-w-md whitespace-pre-wrap">{cvError}</p>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
             </div>

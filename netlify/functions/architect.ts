@@ -30,45 +30,91 @@ export default async (req: Request, context: Context) => {
 
     const resolvedJobText = jobDescription || "";
     if (!resolvedJobText.trim()) {
-      return Response.json({ 
-        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL." 
+      return Response.json({
+        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL."
       }, { status: 400 });
     }
 
-    const apiKey = process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    // Pre-flight size guard. Gemini caps input at 1,048,576 tokens; oversized input
+    // returns a raw 400 "input token count exceeds the maximum" before any document
+    // is produced. Roughly one token per ~4 characters, so we bound the combined
+    // payload well under that ceiling (~300k tokens) and return an actionable,
+    // localized message instead of the cryptic API error. With proper client-side
+    // text extraction this should essentially never trigger — it is a backstop for
+    // extreme pastes or many large uploads.
+    const TOTAL_CHAR_BUDGET = 1_200_000;
+    const totalChars = fullDocumentsContext.length + resolvedJobText.length;
+    if (totalChars > TOTAL_CHAR_BUDGET) {
       return Response.json({
-        error: "USER_GEMINI_API_KEY is not defined in Netlify environment variables."
-      }, { status: 500 });
+        error: lang === "en"
+          ? `⚠️ **Your documents are too large to process**
+
+The combined candidate documents and job advert are far longer than the AI can read in one request.
+
+**How to resolve this:**
+1. **Keep only the relevant résumé/CV** and remove unrelated files.
+2. **Trim very long pasted text** so it focuses on your experience and the target role.
+3. If you uploaded a scanned or image-based PDF, paste the actual text instead — scanned files carry a lot of hidden data.`
+          : `⚠️ **Dina dokument är för stora för att bearbetas**
+
+De sammanlagda kandidatdokumenten och jobbannonsen är betydligt längre än vad AI:n kan läsa i en förfrågan.
+
+**Så här löser du det:**
+1. **Behåll endast relevant meritförteckning/CV** och ta bort orelaterade filer.
+2. **Korta ner mycket lång inklistrad text** så att den fokuserar på din erfarenhet och rollen.
+3. Om du laddat upp en inskannad eller bildbaserad PDF, klistra in själva texten i stället – inskannade filer bär på mycket dold data.`
+      }, { status: 400 });
     }
 
-    // Prevent Netlify AI Gateway hijacking by deleting platform-injected overrides
-    delete process.env.GOOGLE_GEMINI_BASE_URL;
-    delete process.env.GEMINI_API_KEY;
+    // Route inference through the Netlify AI Gateway rather than a personal free-tier
+    // Gemini key. The free tier's 15 requests/min and 250k tokens/min caps are the direct
+    // cause of the recurring 429 RESOURCE_EXHAUSTED errors — and because that quota lives
+    // on the key, not the model, switching to a different Gemini model would not avoid it.
+    // The gateway is billed to Netlify credits with far higher account-level limits, so
+    // routing through it is what actually removes the quota wall. The @google/genai SDK
+    // auto-detects the gateway-injected GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL; we only
+    // fall back to a directly supplied key when the gateway is unavailable (e.g. a plain
+    // local `node` run without `netlify dev`).
+    const ai = process.env.GOOGLE_GEMINI_BASE_URL
+      ? new GoogleGenAI({})
+      : new GoogleGenAI({ apiKey: process.env.USER_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "" });
 
-    const ai = new GoogleGenAI({ apiKey: apiKey });
+    // Model is overridable via env so it can be tuned without a code change. The gateway
+    // supports gemini-2.5-flash (fast, reliable for this JSON-structured workload) by default.
+    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+    // Shared, non-negotiable writing standard injected into every mode.
+    // The single goal of all generated documentation is to earn the candidate an interview,
+    // so the language must read as if written by a top-tier native professional, not an AI.
+    const writingStandard = `WRITING & LANGUAGE STANDARD (applies to every text field — non-negotiable):
+- Write as a fluent native speaker of ${targetLang}. Flawless grammar, spelling, punctuation, idiom and natural word order. Zero translation artifacts, zero anglicisms (unless writing English), zero awkward phrasing.
+- Professional recruiting register: confident, warm, precise and credible. Never robotic, never breathless, never salesy.
+- Strictly active voice and strong, specific verbs. Cut every filler word, cliché and hollow buzzword ("hardworking team player", "passionate about", "results-driven", "I am writing to apply for").
+- Lead with evidence. Quantify impact with concrete numbers, scope and outcomes whenever the source documents support it. Never invent facts, employers, metrics or credentials.
+- Mirror the exact terminology, hard skills and keywords used in the job description so the text resonates with both ATS parsers and the human recruiter.
+- Vary sentence rhythm so the prose sounds human. Avoid repetitive openings and formulaic AI patterns.
+- Use clean, readable Markdown (short paragraphs, bold for emphasis, lists where they aid scanning). Never expose raw schema names, code or meta-commentary to the reader.`;
 
     let systemMetaConfigPrompt = "";
     let responseSchema: any = null;
 
     if (mode === "core") {
-      systemMetaConfigPrompt = `You are a Principal Technical Recruiter and Executive Career Coach.
-Your core competency is auditing candidate profile documents against specialized roles/job descriptions and creating a deep matching analysis.
+      systemMetaConfigPrompt = `You are a Principal Technical Recruiter and Executive Career Coach who decides which applicants reach the interview stage.
+Your task is to audit the candidate's documents against the target role and produce a sharp, honest, recruiter-grade match analysis that the candidate can act on immediately to secure an interview.
 
-CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'title', 'companyName', 'keyOverlaps', 'criticalGaps', and 'coachingStrategy') in the "${targetLang}" language.
+${writingStandard}
 
-CRITICAL SPEED & CONCISENESS LIMITS:
-- "coachingStrategy": Provide extremely actionable, bulleted coaching points (maximum 220 words).
+CRITICAL INSTRUCTION: Generate ALL human-readable text fields ('title', 'companyName', 'keyOverlaps', 'criticalGaps', 'coachingStrategy') in ${targetLang}.
 
-You MUST satisfy the following structural objectives in your response:
-1. "title": Estimate or extract the clean Job Title.
-2. "companyName": Extract the clean Company/Employer Name.
-3. "matchScore": Allocate a precise 0-100 percentage match.
-4. "keyOverlaps": Highlight major overlaps or matched strengths (maximum 5 items).
-5. "criticalGaps": Highlight critical missing items or requirements gaps (maximum 5 items).
-6. "coachingStrategy": Provide strategic guidance and tactical blueprints within the 220-word limit.
+FIELD-SPECIFIC GUIDANCE:
+- "title": The clean, exact job title as a recruiter would write it.
+- "companyName": The clean employer/company name only.
+- "matchScore": A precise 0-100 integer reflecting genuine fit against the stated requirements — calibrated and defensible, not inflated.
+- "keyOverlaps": Up to 5 of the candidate's strongest, most relevant proof points, each phrased as a concrete strength tied to a specific job requirement (not generic praise).
+- "criticalGaps": Up to 5 real gaps versus the requirements, each phrased constructively as a risk the candidate must neutralise — never vague.
+- "coachingStrategy": A tight, well-structured interview-winning game plan in Markdown (use short bold sub-headings and bullets). Cover: how to frame the strongest overlaps, how to defuse each critical gap, and 2-3 specific talking points or questions that signal the candidate is the obvious hire. Maximum 240 words of genuinely useful, tailored advice — no padding.
 
-Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
+Return strictly valid JSON matching the schema. No preamble, no meta-commentary. All human-readable text in ${targetLang}.`;
 
       responseSchema = {
         type: Type.OBJECT,
@@ -90,24 +136,27 @@ Your output must be returned strictly in JSON adhering to the specified schema c
         }
       };
     } else if (mode === "materials") {
-      systemMetaConfigPrompt = `You are a Technical Resume Writer, Executive Coach, and Expert Prompt Engineer.
-Your core competency is auditing candidate profile documents against specialized roles/job descriptions, writing a custom tailored cover letter, optimizing resume bullet points, and synthesizing a specialized Interviewer Persona & System Prompt.
+      systemMetaConfigPrompt = `You are an elite Executive Resume Writer and Cover Letter Specialist whose letters consistently get candidates invited to interview.
+Your task is to write a compelling, tailored cover letter, sharpen three resume bullet points, and design a realistic mock-interviewer persona — all from the candidate's real documents and the target job.
 
-CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'coverLetter', 'personaTitle', and all properties within 'optimizedBulletPoints') in the "${targetLang}" language.
-The system prompt ('personaSystemPrompt') can contain instructions configured for the sandbox, but the mock interviewer in that prompt should also converse in "${targetLang}".
+${writingStandard}
 
-CRITICAL SPEED & CONCISENESS LIMITS:
-- "coverLetter": Keep it highly compelling but compact (maximum 220 words, 3 punchy paragraphs).
-- "personaSystemPrompt": Keep the instruction set concise, sharp, and high-performance (maximum 160 words).
-- "optimizedBulletPoints": Provide exactly 3 high-impact bullet adjustments, keeping each description extremely brief.
+CRITICAL INSTRUCTION: Generate ALL human-readable text fields ('coverLetter', 'personaTitle', and every property inside 'optimizedBulletPoints') in ${targetLang}.
+The 'personaSystemPrompt' is a system instruction for a mock-interview chatbot; it may contain configuration language, but instruct that interviewer to converse with the candidate in ${targetLang}.
 
-You MUST satisfy the following structural objectives in your response:
-1. "personaTitle": Design a powerful, highly specialized interviewer persona (e.g. "Senior Staff Staffing Director at Google Workspace").
-2. "personaSystemPrompt": Construct a high-performance system prompt that instructs the sandbox workspace to act as this custom persona.
-3. "coverLetter": Compose a beautifully tailored standard Cover Letter within the 220-word limit.
-4. "optimizedBulletPoints": Provide exactly 3 high-value resume bullet adjustments.
+FIELD-SPECIFIC GUIDANCE:
+- "coverLetter": This is the document that wins the interview. Write a complete, properly formatted business letter in Markdown with a genuine structure:
+    1. A natural salutation (address the hiring manager/company; use a professional greeting appropriate to ${targetLang} — never "Dear Sir/Madam" boilerplate if a better fit exists).
+    2. An opening that hooks in the first sentence by connecting the candidate's single most relevant achievement to what this specific role and company need — no "I am writing to apply for".
+    3. One or two body paragraphs of evidence: concrete, quantified accomplishments mapped directly to the job's top requirements and keywords, showing fit and impact.
+    4. A short paragraph on motivation/culture fit that is specific to this employer, not generic flattery.
+    5. A confident closing with a clear call to action, followed by a professional sign-off and the candidate's name.
+  Target roughly 250-350 words of high-quality prose — long enough to persuade, tight enough to respect the reader. Every sentence must earn its place.
+- "personaTitle": A specific, credible interviewer identity (e.g. "Senior Engineering Manager, Platform Team").
+- "personaSystemPrompt": A concise, high-performance system prompt (max ~180 words) that turns a chatbot into this interviewer for realistic practice, conversing in ${targetLang}.
+- "optimizedBulletPoints": Exactly 3 resume bullet upgrades. For each: 'impactArea' (what it strengthens), 'originalSuggestion' (a realistic weak version drawn from the candidate's material), 'optimizedSuggestion' (a strong action-verb-led, quantified, keyword-aligned rewrite), and 'keywordJustification' (which job keywords/competencies it now hits and why a recruiter will notice).
 
-Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. All human-readable text must be in ${targetLang}.`;
+Return strictly valid JSON matching the schema. No preamble, no meta-commentary. All human-readable text in ${targetLang}.`;
 
       responseSchema = {
         type: Type.OBJECT,
@@ -138,15 +187,20 @@ Your output must be returned strictly in JSON adhering to the specified schema c
       };
     } else if (mode === "resume") {
       systemMetaConfigPrompt = `You are an expert Resume Writer and ATS Optimization Specialist with 15+ years of executive recruiting experience.
-Your task is to construct a complete, professionally formatted, ATS-optimized resume/CV for the candidate, precisely tailored to the target job.
+Your task is to construct a complete, professionally formatted, ATS-optimized resume/CV for the candidate, precisely tailored to the target job so it clears automated screening and earns an interview.
+
+${writingStandard}
 
 CRITICAL EXTRACTION RULES:
-- Extract ONLY real information found in the candidate documents. Do NOT invent companies, roles, or qualifications.
+- Extract ONLY real information found in the candidate documents. Do NOT invent companies, roles, dates, metrics or qualifications.
 - If contact details are missing, use empty strings.
-- Generate all professional text (summary, bullet points) in "${targetLang}".
-- Bullet points must be achievement-focused and keyword-rich based on the job description (use STAR format where possible).
-- Summary must be 3-4 sentences: hook, key experience, value proposition, tailored to the role.
-- Extract and include ALL available experience, skills, education from the documents.`;
+- Generate all professional text (summary, bullet points) in ${targetLang}.
+
+QUALITY RULES:
+- Every experience bullet must start with a strong, varied action verb and follow STAR logic (situation/task → action → quantified result) wherever the source supports it. No two bullets should open with the same verb.
+- Weave the job description's exact hard skills, tools and keywords naturally into the summary, bullets and skills so ATS parsers score the resume highly — never keyword-stuff.
+- "summary": 3-4 sentences — a sharp hook, the candidate's most relevant experience, a quantified value proposition, all tailored to this specific role.
+- Capture ALL real experience, skills, education, certifications and achievements present in the documents; phrase each in clean, recruiter-ready language.`;
 
       responseSchema = {
         type: Type.OBJECT,
@@ -220,31 +274,27 @@ CRITICAL EXTRACTION RULES:
 
     } else {
       // Default: full combined object (fallback/legacy)
-      systemMetaConfigPrompt = `You are a Principal Technical Recruiter, Executive Career Coach, and Expert Prompt Engineer.
-Your core competency is auditing candidate profile documents against specialized roles/job descriptions, creating a deep matching analysis, and synthesizing a production-grade custom System Prompt for simulated interview chat sandboxes.
+      systemMetaConfigPrompt = `You are a Principal Technical Recruiter, Executive Career Coach, and elite Cover Letter Specialist whose materials consistently get candidates invited to interview.
+Your task is to audit the candidate's documents against the target role, produce a recruiter-grade match analysis, write an interview-winning cover letter, sharpen resume bullets, and design a realistic mock-interviewer persona.
 
-CRITICAL INSTRUCTION: You MUST generate all human-readable output text fields (including 'title', 'companyName', 'personaTitle', 'keyOverlaps', 'criticalGaps', 'coverLetter', 'coachingStrategy', and all properties within 'optimizedBulletPoints') in the "${targetLang}" language. 
-The system prompt ('personaSystemPrompt') can contain instructions configured for the sandbox, but the mock interviewer in that prompt should also converse in "${targetLang}".
+${writingStandard}
 
-CRITICAL SPEED & CONCISENESS LIMITS:
-- "coverLetter": Keep it highly compelling but compact (maximum 220 words, 3 punchy paragraphs).
-- "coachingStrategy": Provide extremely actionable, bulleted coaching points (maximum 220 words).
-- "personaSystemPrompt": Keep the instruction set concise, sharp, and high-performance (maximum 160 words).
-- "optimizedBulletPoints": Provide exactly 3 high-impact bullet adjustments, keeping each description extremely brief.
+CRITICAL INSTRUCTION: Generate ALL human-readable text fields ('title', 'companyName', 'personaTitle', 'keyOverlaps', 'criticalGaps', 'coverLetter', 'coachingStrategy', and every property inside 'optimizedBulletPoints') in ${targetLang}.
+The 'personaSystemPrompt' is a system instruction for a mock-interview chatbot; it may contain configuration language, but instruct that interviewer to converse in ${targetLang}.
 
-You MUST satisfy the following structural objectives in your response:
-1. "title": Estimate or extract the clean Job Title.
-2. "companyName": Extract the clean Company/Employer Name.
-3. "matchScore": Allocate a precise 0-100 percentage match.
-4. "personaTitle": Design a powerful, highly specialized interviewer persona (e.g. "Senior Staff Staffing Director at Google Workspace").
-5. "personaSystemPrompt": Construct a high-performance system prompt that instructs the sandbox workspace to act as this custom persona.
-6. "keyOverlaps": Highlight major overlaps or matched strengths (maximum 5 items).
-7. "criticalGaps": Highlight critical missing items or requirements gaps (maximum 5 items).
-8. "coverLetter": Compose a beautifully tailored standard Cover Letter within the 220-word limit.
-9. "optimizedBulletPoints": Provide exactly 3 high-value resume bullet adjustments.
-10. "coachingStrategy": Provide strategic guidance and tactical blueprints within the 220-word limit.
+FIELD-SPECIFIC GUIDANCE:
+1. "title": The clean, exact job title.
+2. "companyName": The clean employer name only.
+3. "matchScore": A calibrated, defensible 0-100 integer — never inflated.
+4. "personaTitle": A specific, credible interviewer identity (e.g. "Senior Engineering Manager, Platform Team").
+5. "personaSystemPrompt": A concise (~180 words) high-performance system prompt that turns a chatbot into this interviewer for realistic practice in ${targetLang}.
+6. "keyOverlaps": Up to 5 concrete strengths, each tied to a specific job requirement.
+7. "criticalGaps": Up to 5 real gaps versus the requirements, phrased constructively as risks to neutralise.
+8. "coverLetter": The document that wins the interview. A complete, properly formatted Markdown business letter — salutation; a first-sentence hook linking the candidate's strongest achievement to this role; one or two evidence paragraphs of quantified, keyword-aligned accomplishments; a specific motivation/fit paragraph; a confident closing with call to action and professional sign-off. Roughly 250-350 words of persuasive, native-fluent prose.
+9. "optimizedBulletPoints": Exactly 3 bullet upgrades, each with a weak 'originalSuggestion' and a strong action-verb-led, quantified, keyword-aligned 'optimizedSuggestion' plus 'impactArea' and 'keywordJustification'.
+10. "coachingStrategy": A tight Markdown interview game plan (max ~240 words) — how to play the overlaps, defuse each gap, and 2-3 specific talking points that mark the candidate as the obvious hire.
 
-Your output must be returned strictly in JSON adhering to the specified schema constraints. Maintain zero meta-introduction filler. Let the advice and synthesized system prompts be premium, authoritative, and immediately useful. All human-readable text must be in ${targetLang}.`;
+Return strictly valid JSON matching the schema. No preamble, no meta-commentary. Make every output premium, authoritative and immediately usable. All human-readable text in ${targetLang}.`;
 
       responseSchema = {
         type: Type.OBJECT,
@@ -287,7 +337,7 @@ Your output must be returned strictly in JSON adhering to the specified schema c
       };
     }
 
-    const modelingPayload = `Please evaluate and align this candidate profile with the specified job opportunity, presenting all outcome text in ${targetLang}:
+    const modelingPayload = `Analyse the candidate against this opportunity and produce documentation engineered to win the candidate an interview. Present all reader-facing text in ${targetLang}.
 
 <candidate_documents>
 ${fullDocumentsContext.trim()}
@@ -297,17 +347,76 @@ ${fullDocumentsContext.trim()}
 ${resolvedJobText.trim()}
 </job_description>
 
-Construct the response conforming strictly to the responseSchema object. Use clear, engaging Markdown syntax inside appropriate text fields.`;
+Ground every claim in the candidate documents — never fabricate. Mirror the job description's terminology and keywords. Respond strictly as JSON conforming to the responseSchema, using clean, native-fluent ${targetLang} Markdown inside text fields.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: modelingPayload,
-      config: {
-        systemInstruction: systemMetaConfigPrompt,
-        responseMimeType: "application/json",
-        responseSchema: responseSchema
+    // The 504 the user reported is a *function timeout*, not a quota or model problem:
+    // synchronous Netlify functions are hard-capped at 26s (see netlify.toml), and Gemini's
+    // default dynamic "thinking" routinely adds ~10-16s per call. On longer résumés / job
+    // adverts that tips a single generation past 26s and Netlify kills it with a 504.
+    // Switching to a different (or "free") model would not fix this — the wall is wall-clock
+    // time inside the function, not the per-key cost or rate limit.
+    //
+    // The fix is to bound generation time on every mode:
+    //   - resume (heavy extraction schema): thinking off entirely (~4-5s).
+    //   - core / materials (persuasive writing): a small, fixed thinking budget instead of
+    //     the unbounded default, so we keep some reasoning quality while capping the long
+    //     "thinking" tail that caused the timeout.
+    // Both budgets are overridable via env so they can be tuned without a code change.
+    const isResume = mode === "resume";
+    const thinkingBudget = isResume
+      ? Number(process.env.GEMINI_RESUME_THINKING_BUDGET ?? 0)
+      : Number(process.env.GEMINI_THINKING_BUDGET ?? 1024);
+
+    const generationConfig: any = {
+      systemInstruction: systemMetaConfigPrompt,
+      responseMimeType: "application/json",
+      responseSchema: responseSchema,
+      thinkingConfig: { thinkingBudget }
+    };
+
+    // Gemini frequently returns transient 503 "model is overloaded / high demand"
+    // (UNAVAILABLE) errors, and the gateway can surface a 504 / deadline blip. Because the
+    // calls are now time-bounded, we can safely retry a few times server-side so a momentary
+    // spike no longer silently drops a step.
+    const isTransientOverload = (err: any): boolean => {
+      const s = `${err?.message || ""} ${JSON.stringify(err || "")}`;
+      return (
+        s.includes("503") ||
+        s.includes("504") ||
+        s.includes("UNAVAILABLE") ||
+        s.includes("overloaded") ||
+        s.includes("high demand") ||
+        s.includes("deadline") ||
+        s.includes("DEADLINE_EXCEEDED") ||
+        s.includes("timeout")
+      );
+    };
+
+    // Every mode is now fast enough that one quick retry still fits inside the 26s budget;
+    // the resume step keeps a couple of extra attempts since it is the most failure-prone.
+    const maxAttempts = isResume ? 3 : 2;
+    let response: any = null;
+    let lastErr: any = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        response = await ai.models.generateContent({
+          model: model,
+          contents: modelingPayload,
+          config: generationConfig
+        });
+        break;
+      } catch (genErr: any) {
+        lastErr = genErr;
+        if (attempt < maxAttempts && isTransientOverload(genErr)) {
+          await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+          continue;
+        }
+        throw genErr;
       }
-    });
+    }
+    if (!response) {
+      throw lastErr || new Error("Generation failed without a response.");
+    }
 
     return Response.json(JSON.parse(response.text || "{}"));
   } catch (error: any) {
@@ -315,8 +424,57 @@ Construct the response conforming strictly to the responseSchema object. Use cle
     
     const errStr = error?.message || String(error);
     let friendlyError = errStr;
-    
+
     if (
+      errStr.includes("token count") ||
+      errStr.includes("maximum number of tokens") ||
+      errStr.includes("exceeds the maximum") ||
+      (errStr.includes("400") && errStr.includes("token"))
+    ) {
+      if (lang === "en") {
+        friendlyError = `⚠️ **Your documents are too large to process**
+
+The combined candidate documents and job advert exceed the amount of text the AI can read in one request.
+
+**How to resolve this:**
+1. **Keep only the relevant résumé/CV** and remove unrelated files.
+2. **Trim very long pasted text** so it focuses on your experience and the target role.
+3. If you uploaded a scanned or image-based PDF, paste the actual text instead — scanned files carry a lot of hidden data.`;
+      } else {
+        friendlyError = `⚠️ **Dina dokument är för stora för att bearbetas**
+
+De sammanlagda kandidatdokumenten och jobbannonsen överstiger mängden text som AI:n kan läsa i en förfrågan.
+
+**Så här löser du det:**
+1. **Behåll endast relevant meritförteckning/CV** och ta bort orelaterade filer.
+2. **Korta ner mycket lång inklistrad text** så att den fokuserar på din erfarenhet och rollen.
+3. Om du laddat upp en inskannad eller bildbaserad PDF, klistra in själva texten i stället – inskannade filer bär på mycket dold data.`;
+      }
+    } else if (
+      errStr.includes("504") ||
+      errStr.includes("deadline") ||
+      errStr.includes("DEADLINE_EXCEEDED") ||
+      errStr.includes("timeout") ||
+      errStr.includes("aborted")
+    ) {
+      if (lang === "en") {
+        friendlyError = `⚠️ **The request took too long and timed out**
+
+Generating your documents exceeded the time limit. This usually happens when the pasted documents or job advert are very long.
+
+**How to resolve this:**
+1. **Click the button again** — a fresh attempt often completes within the limit.
+2. **Trim the input slightly** (remove duplicated text or very long sections) so the AI has less to process.`;
+      } else {
+        friendlyError = `⚠️ **Förfrågan tog för lång tid och avbröts**
+
+Att skapa dina dokument överskred tidsgränsen. Det händer oftast när dokumenten eller jobbannonsen är mycket långa.
+
+**Så här löser du det:**
+1. **Klicka på knappen igen** – ett nytt försök går oftast igenom inom gränsen.
+2. **Korta ner texten något** (ta bort dubblerad text eller mycket långa avsnitt) så att AI:n har mindre att bearbeta.`;
+      }
+    } else if (
       errStr.includes("429") ||
       errStr.includes("RESOURCE_EXHAUSTED") ||
       errStr.includes("quota") ||
@@ -324,25 +482,23 @@ Construct the response conforming strictly to the responseSchema object. Use cle
       errStr.includes("limit")
     ) {
       if (lang === "en") {
-        friendlyError = `⚠️ **Google Gemini Quota Limit Exceeded (Error 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **The AI service is busy right now (temporary rate limit)**
 
-You have temporarily exceeded the Google Gemini Free Tier rate limits (which allow a maximum of 15 requests per minute and 250,000 tokens per minute).
+The AI service hit a momentary capacity limit while generating your documents. This is temporary and resets within a minute.
 
-**How to easily resolve this:**
-1. **Wait 15 seconds**, then click the button again.
-2. Avoid clicking the button repeatedly in rapid succession.
-3. If your uploaded resume or pasted job description is exceptionally long, try shortening or summarizing the text slightly to reduce the token count.
-4. If you have a billing-enabled paid API key, verify that it is properly set up in your Netlify Environment Variables or local .env file.`;
+**How to resolve this:**
+1. **Wait about 15 seconds**, then click the button again.
+2. Avoid clicking repeatedly in quick succession — each run starts several AI requests at once.
+3. If your uploaded résumé or pasted job advert is very long, trimming it slightly lowers the load and helps it go through.`;
       } else {
-        friendlyError = `⚠️ **Begränsning i Google Gemini-kvot (Fel 429 - RESOURCE_EXHAUSTED)**
+        friendlyError = `⚠️ **AI-tjänsten är upptagen just nu (tillfällig gräns)**
 
-Du har tillfälligt överskridit gränserna för gratisnivån (som tillåter max 15 anrop per minut och 250 000 ord/tokens per minut).
+AI-tjänsten nådde en tillfällig kapacitetsgräns när dina dokument skapades. Detta är övergående och återställs inom en minut.
 
-**Så här löser du det enkelt:**
-1. **Vänta 15 sekunder** och klicka sedan på knappen igen.
-2. Undvik att klicka på knappen upprepade gånger i snabb följd.
-3. Om dina dokument eller din jobbannons är extremt långa, försök att korta ner dem något så att de inte överskrider gränsen.
-4. Om du använder en betald API-nyckel, säkerställ att den är korrekt konfigurerad under dina Netlify-miljövariabler eller .env-fil.`;
+**Så här löser du det:**
+1. **Vänta cirka 15 sekunder** och klicka sedan på knappen igen.
+2. Undvik att klicka upprepade gånger i snabb följd – varje körning startar flera AI-anrop samtidigt.
+3. Om din uppladdade meritförteckning eller jobbannons är mycket lång, korta ner den något för att minska belastningen.`;
       }
     }
     
