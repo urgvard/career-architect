@@ -110,6 +110,8 @@ const TRANSLATIONS = {
     themeLabel: "Tema",
     themeLight: "Ljust",
     themeDark: "Mörkt",
+    newCV: "NYTT CV",
+    newCVTip: "Börja om och skapa ett nytt CV från början",
   },
   en: {
     appTitle: "Career Architect",
@@ -188,6 +190,8 @@ const TRANSLATIONS = {
     themeLabel: "Theme",
     themeLight: "Light",
     themeDark: "Dark",
+    newCV: "NEW CV",
+    newCVTip: "Start over and generate a brand new CV from scratch",
   }
 };
 
@@ -778,9 +782,27 @@ Att skapa dina dokument överskred tidsgränsen. Det händer oftast när dokumen
     }
   };
 
+  // Reset the whole workspace so the user can generate a brand new CV from
+  // scratch. Clears candidate documents, the job opportunity, every generated
+  // result and any in-flight error/progress state, then returns to the first tab
+  // and scrolls back to the top.
+  const handleStartNewCV = () => {
+    setDocumentsPasted("");
+    setUploadedFiles([]);
+    setFileNotice(null);
+    setJobDescription("");
+    setJobUrl("");
+    setResult(null);
+    setAlignError(null);
+    setAlignStep("");
+    setCvError(null);
+    setActiveTab("match");
+    setCopiedStates({});
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   // Clipboard copies helper
-  const triggerCopy = (key: string, textToCopy: string) => {
-    navigator.clipboard.writeText(textToCopy);
+  const triggerCopy = (key: string, textToCopy: string) => {    navigator.clipboard.writeText(textToCopy);
     setCopiedStates((prev) => ({ ...prev, [key]: true }));
     setTimeout(() => {
       setCopiedStates((prev) => ({ ...prev, [key]: false }));
@@ -1049,6 +1071,17 @@ Att skapa dina dokument överskred tidsgränsen. Det händer oftast när dokumen
 
           {/* DUAL TOGGLE HEADERS (LANGUAGE & THEME) */}
           <div className="flex flex-wrap items-center gap-4 bg-neutral-900 border border-neutral-800 rounded-xl p-2 shrink-0 shadow-lg">
+            {/* New CV / Start over */}
+            <button
+              type="button"
+              onClick={handleStartNewCV}
+              title={t.newCVTip}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-black uppercase tracking-wide shadow-md transition-colors cursor-pointer shrink-0"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>{t.newCV}</span>
+            </button>
+
             {/* Language Toggle */}
             <div className="flex items-center gap-2">
               <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider pl-1.5 hidden sm:inline-flex items-center gap-1">
