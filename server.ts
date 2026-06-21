@@ -120,8 +120,20 @@ app.post("/api/architect", async (req, res) => {
     // Resolve Job Description
     const resolvedJobText = jobDescription || "";
     if (!resolvedJobText.trim()) {
-      return res.status(400).json({ 
-        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL." 
+      return res.status(400).json({
+        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL."
+      });
+    }
+
+    // Pre-flight size guard mirroring the deployed function: keep the combined
+    // payload well under Gemini's 1,048,576-token input ceiling so oversized input
+    // returns an actionable, localized message instead of a raw 400 token error.
+    const TOTAL_CHAR_BUDGET = 1_200_000;
+    if (fullDocumentsContext.length + resolvedJobText.length > TOTAL_CHAR_BUDGET) {
+      return res.status(400).json({
+        error: lang === "en"
+          ? "⚠️ **Your documents are too large to process**\n\nThe combined candidate documents and job advert are far longer than the AI can read in one request. Keep only the relevant résumé/CV, trim very long pasted text, and if you uploaded a scanned/image PDF, paste the actual text instead."
+          : "⚠️ **Dina dokument är för stora för att bearbetas**\n\nDe sammanlagda kandidatdokumenten och jobbannonsen är betydligt längre än vad AI:n kan läsa i en förfrågan. Behåll endast relevant meritförteckning/CV, korta ner mycket lång inklistrad text, och om du laddat upp en inskannad/bild-PDF, klistra in själva texten i stället."
       });
     }
 
@@ -321,8 +333,17 @@ Construct the response conforming strictly to the responseSchema object. Use cle
     
     const errStr = error?.message || String(error);
     let friendlyError = errStr;
-    
+
     if (
+      errStr.includes("token count") ||
+      errStr.includes("maximum number of tokens") ||
+      errStr.includes("exceeds the maximum") ||
+      (errStr.includes("400") && errStr.includes("token"))
+    ) {
+      friendlyError = lang === "en"
+        ? "⚠️ **Your documents are too large to process**\n\nThe combined candidate documents and job advert exceed the amount of text the AI can read in one request. Keep only the relevant résumé/CV, trim very long pasted text, and if you uploaded a scanned/image PDF, paste the actual text instead."
+        : "⚠️ **Dina dokument är för stora för att bearbetas**\n\nDe sammanlagda kandidatdokumenten och jobbannonsen överstiger mängden text som AI:n kan läsa i en förfrågan. Behåll endast relevant meritförteckning/CV, korta ner mycket lång inklistrad text, och om du laddat upp en inskannad/bild-PDF, klistra in själva texten i stället.";
+    } else if (
       errStr.includes("429") ||
       errStr.includes("RESOURCE_EXHAUSTED") ||
       errStr.includes("quota") ||

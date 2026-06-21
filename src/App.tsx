@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { UploadFile, AlignmentResult, BulletOptimization } from "./types";
+import { extractFileText } from "./lib/extractText";
 import SandboxPlayground from "./components/SandboxPlayground";
 import CVBuilder from "./components/CVBuilder";
 import {
@@ -220,6 +221,10 @@ export default function App() {
   const [documentsPasted, setDocumentsPasted] = useState("");
   const [uploadedFiles, setUploadedFiles] = useState<UploadFile[]>([]);
   const [isDragActive, setIsDragActive] = useState(false);
+  // Files are now parsed (PDF/DOCX text extraction) before use; surface progress
+  // and any per-file extraction warnings to the user.
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [fileNotice, setFileNotice] = useState<string | null>(null);
 
   // Job Opportunity State
   const [jobDescription, setJobDescription] = useState("");
@@ -462,25 +467,36 @@ export default function App() {
     };
   }, [splashActive]);
 
-  // Quick helper to read dropped files client-side
-  const readAndAddFiles = (filesList: File[]) => {
-    filesList.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const text = event.target?.result as string;
+  // Read dropped/selected files and extract their real text. Binary formats
+  // (PDF, DOCX) are parsed into clean text rather than decoded as raw bytes —
+  // sending decoded binary previously blew past the model's token limit.
+  const readAndAddFiles = async (filesList: File[]) => {
+    if (filesList.length === 0) return;
+    setIsExtracting(true);
+    setFileNotice(null);
+    const warnings: string[] = [];
+    try {
+      for (const file of filesList) {
+        const { text, warning } = await extractFileText(file, lang);
+        if (warning) warnings.push(warning);
+        if (!text) continue;
         const sizeStr = (file.size / 1024).toFixed(1) + " KB";
         setUploadedFiles((prev) => [
           ...prev,
           { name: file.name, content: text, size: sizeStr },
         ]);
-      };
-      reader.readAsText(file);
-    });
+      }
+    } finally {
+      setIsExtracting(false);
+      setFileNotice(warnings.length ? warnings.join("\n") : null);
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      readAndAddFiles(Array.from(e.target.files));
+      void readAndAddFiles(Array.from(e.target.files));
+      // Allow re-selecting the same file after a removal.
+      e.target.value = "";
     }
   };
 
@@ -499,7 +515,7 @@ export default function App() {
     e.stopPropagation();
     setIsDragActive(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      readAndAddFiles(Array.from(e.dataTransfer.files));
+      void readAndAddFiles(Array.from(e.dataTransfer.files));
     }
   };
 
@@ -509,6 +525,7 @@ export default function App() {
 
   const handleClearAllFiles = () => {
     setUploadedFiles([]);
+    setFileNotice(null);
   };
 
   // Run Document-to-Job alignment cognitive pipeline
@@ -1167,11 +1184,26 @@ Att skapa dina dokument överskred tidsgränsen. Det händer oftast när dokumen
                       id="file-upload-input"
                       type="file"
                       multiple
+                      accept=".pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.json,.rtf,.html,.htm,.yaml,.yml,.log,.text"
                       onChange={handleFileChange}
                       className="hidden"
                     />
                   </label>
                 </div>
+
+                {/* Extraction progress + per-file warnings */}
+                {isExtracting && (
+                  <div className="flex items-center gap-2 text-[11px] text-neutral-500 dark:text-neutral-400">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>{lang === "en" ? "Reading document text…" : "Läser dokumenttext…"}</span>
+                  </div>
+                )}
+                {fileNotice && (
+                  <div className="flex items-start gap-2 text-[11px] text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/40 rounded p-2">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span className="whitespace-pre-line leading-snug">{fileNotice}</span>
+                  </div>
+                )}
 
                 {/* File list indicators */}
                 {uploadedFiles.length > 0 && (

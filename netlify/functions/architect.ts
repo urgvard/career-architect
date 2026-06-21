@@ -30,8 +30,39 @@ export default async (req: Request, context: Context) => {
 
     const resolvedJobText = jobDescription || "";
     if (!resolvedJobText.trim()) {
-      return Response.json({ 
-        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL." 
+      return Response.json({
+        error: lang === "en" ? "Please paste a Job Description or enter a valid job page URL." : "Vänligen klistra in en jobbannons eller ange en giltig URL."
+      }, { status: 400 });
+    }
+
+    // Pre-flight size guard. Gemini caps input at 1,048,576 tokens; oversized input
+    // returns a raw 400 "input token count exceeds the maximum" before any document
+    // is produced. Roughly one token per ~4 characters, so we bound the combined
+    // payload well under that ceiling (~300k tokens) and return an actionable,
+    // localized message instead of the cryptic API error. With proper client-side
+    // text extraction this should essentially never trigger — it is a backstop for
+    // extreme pastes or many large uploads.
+    const TOTAL_CHAR_BUDGET = 1_200_000;
+    const totalChars = fullDocumentsContext.length + resolvedJobText.length;
+    if (totalChars > TOTAL_CHAR_BUDGET) {
+      return Response.json({
+        error: lang === "en"
+          ? `⚠️ **Your documents are too large to process**
+
+The combined candidate documents and job advert are far longer than the AI can read in one request.
+
+**How to resolve this:**
+1. **Keep only the relevant résumé/CV** and remove unrelated files.
+2. **Trim very long pasted text** so it focuses on your experience and the target role.
+3. If you uploaded a scanned or image-based PDF, paste the actual text instead — scanned files carry a lot of hidden data.`
+          : `⚠️ **Dina dokument är för stora för att bearbetas**
+
+De sammanlagda kandidatdokumenten och jobbannonsen är betydligt längre än vad AI:n kan läsa i en förfrågan.
+
+**Så här löser du det:**
+1. **Behåll endast relevant meritförteckning/CV** och ta bort orelaterade filer.
+2. **Korta ner mycket lång inklistrad text** så att den fokuserar på din erfarenhet och rollen.
+3. Om du laddat upp en inskannad eller bildbaserad PDF, klistra in själva texten i stället – inskannade filer bär på mycket dold data.`
       }, { status: 400 });
     }
 
@@ -395,6 +426,31 @@ Ground every claim in the candidate documents — never fabricate. Mirror the jo
     let friendlyError = errStr;
 
     if (
+      errStr.includes("token count") ||
+      errStr.includes("maximum number of tokens") ||
+      errStr.includes("exceeds the maximum") ||
+      (errStr.includes("400") && errStr.includes("token"))
+    ) {
+      if (lang === "en") {
+        friendlyError = `⚠️ **Your documents are too large to process**
+
+The combined candidate documents and job advert exceed the amount of text the AI can read in one request.
+
+**How to resolve this:**
+1. **Keep only the relevant résumé/CV** and remove unrelated files.
+2. **Trim very long pasted text** so it focuses on your experience and the target role.
+3. If you uploaded a scanned or image-based PDF, paste the actual text instead — scanned files carry a lot of hidden data.`;
+      } else {
+        friendlyError = `⚠️ **Dina dokument är för stora för att bearbetas**
+
+De sammanlagda kandidatdokumenten och jobbannonsen överstiger mängden text som AI:n kan läsa i en förfrågan.
+
+**Så här löser du det:**
+1. **Behåll endast relevant meritförteckning/CV** och ta bort orelaterade filer.
+2. **Korta ner mycket lång inklistrad text** så att den fokuserar på din erfarenhet och rollen.
+3. Om du laddat upp en inskannad eller bildbaserad PDF, klistra in själva texten i stället – inskannade filer bär på mycket dold data.`;
+      }
+    } else if (
       errStr.includes("504") ||
       errStr.includes("deadline") ||
       errStr.includes("DEADLINE_EXCEEDED") ||
