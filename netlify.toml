@@ -10,3 +10,6 @@
 
 [functions.chat]
   timeout = 26
+
+[functions.scrape]
+  timeout = 26
